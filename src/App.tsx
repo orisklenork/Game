@@ -101,6 +101,7 @@ export default function App() {
   const canvasMountRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<HorrorGameEngine | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const pendingWsQueueRef = useRef<Array<{ type: string; payload: any }>>([]);
 
   const [booting, setBooting] = useState(true);
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
@@ -158,6 +159,8 @@ export default function App() {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type, payload }));
+    } else {
+      pendingWsQueueRef.current.push({ type, payload });
     }
   }, []);
 
@@ -239,6 +242,10 @@ export default function App() {
 
       ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'auth', payload: { token } }));
+        while (pendingWsQueueRef.current.length > 0) {
+          const queued = pendingWsQueueRef.current.shift();
+          if (queued) ws.send(JSON.stringify(queued));
+        }
         refreshFriends();
       };
 

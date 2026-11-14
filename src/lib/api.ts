@@ -81,7 +81,18 @@ export async function apiFetch<T = any>(path: string, options: RequestInit = {})
     headers['Authorization'] = `Bearer ${token}`;
   }
   const res = await fetch(path, { ...options, headers });
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text();
+  let data: any = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!res.ok) {
+        throw new Error(`Request failed (${res.status})`);
+      }
+      throw new Error('Unexpected non-JSON response from server.');
+    }
+  }
   if (!res.ok) {
     throw new Error(data.error || `Request failed (${res.status})`);
   }

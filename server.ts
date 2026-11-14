@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import {
   buyCustomization,
   buyWeapon,
@@ -23,9 +22,9 @@ import {
   upgradeWeapon,
 } from './server/db.ts';
 import { getOnlinePlayerIds, setupGameWebSocket } from './server/gameServer.ts';
-import { WeaponId } from './src/shared/gameData.ts';
+import type { WeaponId } from './src/shared/gameData.ts';
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const MAX_REGISTRATIONS_PER_MIN = Math.max(1, Number(process.env.RATE_LIMIT_MAX_REGISTRATIONS) || 10);
 
 // Simple in-memory rate limiter for account creation & API protection
@@ -232,6 +231,7 @@ async function startServer() {
   setupGameWebSocket(server);
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false },
       appType: 'spa',

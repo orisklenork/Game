@@ -2,6 +2,21 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      window.addEventListener('error', function (e) {
+        if (e && typeof e.filename === 'string' && e.filename.indexOf('chrome-extension://') === 0) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) {
+        var stack = e && e.reason && e.reason.stack ? String(e.reason.stack) : '';
+        if (stack.indexOf('chrome-extension://') !== -1) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      }, true);
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Nightfall — 3D Two-Player Horror Survival Shooter</title>
     <meta name="description" content="Two-player 3D multiplayer horror survival shooter with cooperative waves, custom loadouts, five haunted maps, and persistent progression." />

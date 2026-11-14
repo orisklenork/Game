@@ -6,6 +6,17 @@ interface Props {
   onAuthenticated: (profile: PlayerProfile, token: string) => void;
 }
 
+function validateUsernameLocally(raw: string): { valid: boolean; reason?: string } {
+  const trimmed = raw.trim();
+  if (trimmed.length < 3 || trimmed.length > 18) {
+    return { valid: false, reason: 'Username must be 3–18 characters.' };
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    return { valid: false, reason: 'Only letters, numbers, underscores, and hyphens allowed.' };
+  }
+  return { valid: true };
+}
+
 export function AuthOverlay({ onAuthenticated }: Props) {
   const [username, setUsername] = useState('');
   const [availability, setAvailability] = useState<{
@@ -13,35 +24,66 @@ export function AuthOverlay({ onAuthenticated }: Props) {
     valid: boolean;
     available: boolean;
     reason?: string;
+    networkError?: boolean;
   }>({ checked: false, valid: false, available: false });
   const [checking, setChecking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  const trimmed = username.trim();
+  const localCheck = validateUsernameLocally(username);
+
   useEffect(() => {
-    const trimmed = username.trim();
+    setError('');
     if (!trimmed) {
       setAvailability({ checked: false, valid: false, available: false });
+      setChecking(false);
       return;
     }
+    if (!localCheck.valid) {
+      setAvailability({ checked: true, valid: false, available: false, reason: localCheck.reason });
+      setChecking(false);
+      return;
+    }
+
+    let cancelled = false;
     const timer = window.setTimeout(async () => {
       setChecking(true);
       try {
         const res = await fetch(`/api/auth/check-username?username=${encodeURIComponent(trimmed)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        setAvailability({ checked: true, ...data });
+        if (!cancelled) {
+          setAvailability({
+            checked: true,
+            valid: Boolean(data.valid),
+            available: Boolean(data.available),
+            reason: data.reason,
+          });
+        }
       } catch {
-        setAvailability({ checked: false, valid: false, available: false });
+        if (!cancelled) {
+          // Do not lock out submission on transient availability check failure; POST /register validates authoritatively
+          setAvailability({ checked: false, valid: true, available: true, networkError: true });
+        }
       } finally {
-        setChecking(false);
+        if (!cancelled) setChecking(false);
       }
-    }, 220);
-    return () => clearTimeout(timer);
-  }, [username]);
+    }, 180);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [trimmed, localCheck.valid, localCheck.reason]);
+
+  const canSubmit =
+    localCheck.valid &&
+    !submitting &&
+    !(availability.checked && !availability.available);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!availability.valid || !availability.available || submitting) return;
+    if (!canSubmit) return;
     audioEngine.unlock();
     audioEngine.playUiClick();
     setSubmitting(true);
@@ -49,7 +91,7 @@ export function AuthOverlay({ onAuthenticated }: Props) {
     try {
       const data = await apiFetch<{ token: string; profile: PlayerProfile }>('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ username: username.trim() }),
+        body: JSON.stringify({ username: trimmed }),
       });
       saveToken(data.token);
       onAuthenticated(data.profile, data.token);
@@ -103,6 +145,9 @@ export function AuthOverlay({ onAuthenticated }: Props) {
               {!checking && availability.checked && (!availability.valid || !availability.available) && (
                 <span className="text-red-400">{availability.reason}</span>
               )}
+              {!checking && !availability.checked && localCheck.valid && availability.networkError && (
+                <span className="text-slate-400">Callsign format valid — click Enter Nightfall to register</span>
+              )}
             </div>
           </div>
 
@@ -110,7 +155,7 @@ export function AuthOverlay({ onAuthenticated }: Props) {
 
           <button
             type="submit"
-            disabled={!availability.valid || !availability.available || submitting}
+            disabled={!canSubmit}
             className="w-full py-3 px-6 rounded-lg font-display font-semibold text-base bg-red-600 hover:bg-red-500 disabled:bg-slate-800 disabled:text-slate-500 text-white transition-colors cursor-pointer disabled:cursor-not-allowed"
           >
             {submitting ? 'Creating Operative...' : 'Enter Nightfall'}

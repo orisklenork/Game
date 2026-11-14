@@ -6,12 +6,11 @@ import {
   ACHIEVEMENTS,
   CUSTOMIZATION_ITEMS,
   DEFAULT_LOADOUT,
-  EquippedLoadout,
   getLevelFromXp,
   getWeaponUpgradeCost,
   WEAPONS,
-  WeaponId,
 } from '../src/shared/gameData.ts';
+import type { EquippedLoadout, WeaponId } from '../src/shared/gameData.ts';
 
 const dataDir = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(dataDir)) {

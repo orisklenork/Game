@@ -1,21 +1,17 @@
 import crypto from 'crypto';
-import { Server as HttpServer } from 'http';
+import type { Server as HttpServer } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   DIFFICULTIES,
-  DifficultyId,
-  EquippedLoadout,
   getWeaponStatsAtLevel,
   HEALTH_PURCHASE_AMOUNT,
   HEALTH_PURCHASE_COST,
-  MapId,
   MAPS,
   MAX_HEALTH_PURCHASES_PER_MATCH,
   MONSTERS,
-  MonsterType,
   WEAPONS,
-  WeaponId,
 } from '../src/shared/gameData.ts';
+import type { DifficultyId, EquippedLoadout, MapId, MonsterType, WeaponId } from '../src/shared/gameData.ts';
 import { db, getFullProfileById, getProfileByToken, recordMatchResult, spendMatchHealthCoin } from './db.ts';
 
 interface ClientConn {

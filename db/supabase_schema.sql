@@ -7,14 +7,15 @@ create table if not exists public.profiles (
   id uuid primary key default gen_random_uuid(),
   player_code text not null unique,
   username text not null unique,
-  avatar_seed text not null default 'default',
-  coins integer not null default 250 check (coins >= 0),
+  session_token text not null unique,
+  avatar_seed text not null default 'crimson',
+  coins integer not null default 350 check (coins >= 0),
   xp integer not null default 0 check (xp >= 0),
   level integer not null default 1 check (level >= 1),
   rank text not null default 'Recruit',
   equipped_weapon text not null default 'pistol',
   equipped_loadout jsonb not null default '{}'::jsonb,
-  last_daily_claim timestamptz,
+  last_daily_claim date,
   daily_streak integer not null default 0,
   is_online boolean not null default false,
   last_seen timestamptz not null default now(),
@@ -155,6 +156,62 @@ create table if not exists public.achievements (
   primary key (player_id, achievement_id)
 );
 
+create table if not exists public.daily_missions (
+  player_id uuid not null references public.profiles(id) on delete cascade,
+  mission_date date not null,
+  kills_today integer not null default 0,
+  matches_today integer not null default 0,
+  claimed_kills boolean not null default false,
+  claimed_matches boolean not null default false,
+  primary key (player_id, mission_date)
+);
+
+-- Seed Weapons Catalog
+insert into public.weapons (id, name, category, cost) values
+  ('pistol', 'M9 Tactical', 'Sidearm', 0),
+  ('smg', 'MP5 Spectre', 'Submachine Gun', 350),
+  ('shotgun', 'M870 Breacher', 'Shotgun', 550),
+  ('assault_rifle', 'MK18 Carbine', 'Assault Rifle', 850),
+  ('sniper', 'M24 Dread', 'Precision Rifle', 1200),
+  ('lmg', 'M249 Reaper', 'Heavy Machine Gun', 1650),
+  ('plasma', 'Arc Railgun', 'Special Experimental', 2400)
+on conflict (id) do update set name = excluded.name, category = excluded.category, cost = excluded.cost;
+
+-- Seed Customization Items Catalog
+insert into public.customization_items (id, name, category, cost) values
+  ('shirt_slate', 'Operator Tee', 'shirt', 0),
+  ('shirt_crimson', 'Bloodline Compression', 'shirt', 150),
+  ('shirt_obsidian', 'Nightwatch Thermal', 'shirt', 220),
+  ('shirt_hazard', 'Biohazard Lab Tunic', 'shirt', 300),
+  ('outfit_vest', 'Recon Plate Carrier', 'outfit', 0),
+  ('outfit_trench', 'Hunter Trenchcoat', 'outfit', 400),
+  ('outfit_riot', 'Juggernaut Armor', 'outfit', 650),
+  ('outfit_lab', 'Containment Rig', 'outfit', 520),
+  ('skin_default', 'Survivor Standard', 'skin', 0),
+  ('skin_pale', 'Ashen Wraith', 'skin', 280),
+  ('skin_shadow', 'Obsidian Operative', 'skin', 350),
+  ('skin_cyber', 'Synth Alloy', 'skin', 600),
+  ('mask_none', 'No Mask', 'mask', 0),
+  ('mask_gas', 'M50 Gas Mask', 'mask', 250),
+  ('mask_skull', 'Reaper Balaclava', 'mask', 420),
+  ('mask_nvg', 'Quad-Optic NVG', 'mask', 580),
+  ('mask_oni', 'Crimson Oni', 'mask', 750),
+  ('gloves_std', 'Fingerless Wraps', 'gloves', 0),
+  ('gloves_red', 'Crimson Gauntlets', 'gloves', 180),
+  ('gloves_steel', 'Tungsten Grips', 'gloves', 260),
+  ('acc_none', 'None', 'accessory', 0),
+  ('acc_pack', 'Medic Field Pack', 'accessory', 240),
+  ('acc_tank', 'Cryo Fuel Tank', 'accessory', 450),
+  ('acc_katana', 'Carbon Blade Sheath', 'accessory', 550),
+  ('costume_none', 'Standard Gear', 'costume', 0),
+  ('costume_plague', 'Plague Doctor', 'costume', 900),
+  ('costume_spectral', 'Spectral Warden', 'costume', 1350),
+  ('wskin_factory', 'Factory Matte', 'weapon_skin', 0),
+  ('wskin_blood', 'Crimson Vein', 'weapon_skin', 350),
+  ('wskin_cobalt', 'Cobalt Night', 'weapon_skin', 450),
+  ('wskin_gold', 'Gilded Mercenary', 'weapon_skin', 850)
+on conflict (id) do update set name = excluded.name, category = excluded.category, cost = excluded.cost;
+
 -- Enable Row Level Security across all tables
 alter table public.profiles enable row level security;
 alter table public.player_stats enable row level security;
@@ -171,9 +228,12 @@ alter table public.coin_transactions enable row level security;
 alter table public.matches enable row level security;
 alter table public.match_players enable row level security;
 alter table public.achievements enable row level security;
+alter table public.daily_missions enable row level security;
 
--- Public read policies for leaderboards & catalog; writes routed through server-side RPC/Edge Functions
+-- Public read policies for leaderboards, rooms, and catalog; writes routed via server-side service role
 create policy "Public read profiles" on public.profiles for select using (true);
 create policy "Public read stats" on public.player_stats for select using (true);
 create policy "Public read weapons" on public.weapons for select using (true);
 create policy "Public read customizations" on public.customization_items for select using (true);
+create policy "Public read rooms" on public.rooms for select using (true);
+create policy "Public read room_members" on public.room_members for select using (true);
