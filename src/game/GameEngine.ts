@@ -2,16 +2,20 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
   EquippedLoadout,
+  GAME_MODES,
+  GameModeId,
   getWeaponStatsAtLevel,
   MapId,
   MAPS,
   MonsterType,
+  resolveCircleObstacles,
   WEAPON_ORDER,
   WeaponId,
 } from '../shared/gameData';
 import { audioEngine } from './audio';
 import { buildHorrorMap, BuiltMapHandle } from './maps';
 import {
+  buildMedkitModel,
   buildMonsterModel,
   buildPlayerCharacterModel,
   buildWeaponModel,
@@ -42,6 +46,9 @@ export interface HudSnapshot {
   monstersRemaining: number;
   flashlightOn: boolean;
   pointerLocked: boolean;
+  gameMode: GameModeId;
+  pausedBy: string[];
+  boss: { name: string; hp: number; maxHp: number } | null;
   teammate: {
     username: string;
     hp: number;
@@ -82,6 +89,8 @@ export interface ServerStatePacket {
   maxWaves: number;
   waveState: 'combat' | 'intermission';
   remainingToSpawn: number;
+  pausedBy?: string[];
+  gameMode?: GameModeId;
   players: Array<{
     playerId: string;
     x: number;
@@ -209,9 +218,11 @@ export class HorrorGameEngine {
   private localCoinsEarned = 0;
   private localHealthPurchasesUsed = 0;
 
-  // Viewmodel & Flashlight
+  // Viewmodel & Flashlight & Medkit
   private viewModelAnchor = new THREE.Group();
   private viewWeapon: WeaponModelHandle | null = null;
+  private medkitGroup = buildMedkitModel();
+  private medkitAnimTimer = 0;
   private recoilOffset = 0;
   private muzzleFlashTimer = 0;
   private muzzleLight = new THREE.PointLight(0xffb84d, 0, 9);
@@ -225,8 +236,11 @@ export class HorrorGameEngine {
   private mobileShooting = false;
 
   // Authoritative synced entities
+  private gameMode: GameModeId = 'unlimited';
+  private pausedBy: string[] = [];
+  private activeBoss: { name: string; hp: number; maxHp: number } | null = null;
   private wave = 1;
-  private maxWaves = 6;
+  private maxWaves = 0;
   private waveState: 'combat' | 'intermission' = 'intermission';
   private matchElapsedSec = 0;
   private monstersRemaining = 0;
@@ -324,12 +338,16 @@ export class HorrorGameEngine {
 
     this.textures = createProceduralTextures(this.renderer);
 
-    // Camera-attached Viewmodel & Flashlight
+    // Camera-attached Viewmodel, Medkit & Flashlight
     this.camera.add(this.viewModelAnchor);
+    this.medkitGroup.position.set(-0.2, -0.45, -0.45);
+    this.medkitGroup.rotation.set(0.35, 0.2, -0.45);
+    this.medkitGroup.visible = false;
+    this.camera.add(this.medkitGroup);
     this.camera.add(this.muzzleLight);
     this.muzzleLight.position.set(0.22, -0.15, -0.7);
 
-    this.flashlight = new THREE.SpotLight(0xeef6ff, 14, 38, Math.PI / 5.5, 0.45, 1.4);
+    this.flashlight = new THREE.SpotLight(0xeef6ff, 16, 42, Math.PI / 5.2, 0.45, 1.3);
     this.flashlight.position.set(0.18, -0.1, -0.2);
     this.flashlightTarget.position.set(0, 0, -10);
     this.camera.add(this.flashlight);
@@ -347,6 +365,17 @@ export class HorrorGameEngine {
       this.particlePool.push({ mesh, vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0.4 });
     }
 
+    // Pre-allocate tracer pool (Zero GC during gun spam)
+    for (let i = 0; i < 24; i++) {
+      const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+      const mat = new THREE.LineBasicMaterial({ color: 0xfde047, transparent: true, opacity: 0.85 });
+      const line = new THREE.Line(geo, mat);
+      line.visible = false;
+      line.frustumCulled = false;
+      this.scene.add(line);
+      this.tracers.push({ line, life: 0 });
+    }
+
     this.loadMap('hospital');
     this.bindEvents();
 
@@ -360,8 +389,12 @@ export class HorrorGameEngine {
       this.builtMap.dispose();
     }
     const def = MAPS[mapId];
+    const modeFogMult = GAME_MODES[this.gameMode]?.fogMult || 1.0;
     this.scene.background = new THREE.Color(def.skyColor);
-    this.scene.fog = new THREE.FogExp2(def.fogColor, this.quality === 'low' ? def.fogDensity * 0.85 : def.fogDensity);
+    this.scene.fog = new THREE.FogExp2(
+      def.fogColor,
+      (this.quality === 'low' ? def.fogDensity * 0.85 : def.fogDensity) * modeFogMult
+    );
 
     this.builtMap = buildHorrorMap(mapId, this.textures, this.quality, this.isSoftwareGl);
     this.scene.add(this.builtMap.group);
@@ -385,8 +418,13 @@ export class HorrorGameEngine {
   public setDioramaMode(mapId?: MapId) {
     this.mode = 'diorama';
     this.paused = false;
+    this.pausedBy = [];
+    this.activeBoss = null;
+    this.medkitAnimTimer = 0;
+    this.medkitGroup.visible = false;
     this.viewModelAnchor.visible = false;
     this.flashlight.intensity = 0;
+    this.camera.rotation.set(0, 0, 0, 'XYZ');
     this.clearMatchEntities();
     if (document.pointerLockElement) {
       document.exitPointerLock();
@@ -399,20 +437,22 @@ export class HorrorGameEngine {
   public startMatch(params: {
     localPlayerId: string;
     mapId: MapId;
+    gameMode?: GameModeId;
     equippedWeapon: WeaponId;
     ownedWeapons: Record<string, { upgradeLevel: number }>;
     weaponSkinId: string;
     players: RemotePlayerData[];
   }) {
     this.localPlayerId = params.localPlayerId;
+    this.gameMode = params.gameMode || 'unlimited';
+    this.pausedBy = [];
+    this.activeBoss = null;
     this.ownedWeapons = params.ownedWeapons;
     this.equippedWeapon = params.equippedWeapon;
     this.weaponSkinId = params.weaponSkinId;
     this.clearMatchEntities();
 
-    if (params.mapId !== this.currentMapId) {
-      this.loadMap(params.mapId);
-    }
+    this.loadMap(params.mapId);
 
     // Initialize magazines
     for (const wid of WEAPON_ORDER) {
@@ -429,6 +469,7 @@ export class HorrorGameEngine {
         this.playerVelY = 0;
         this.yaw = 0;
         this.pitch = 0;
+        this.camera.rotation.set(0, 0, 0, 'YXZ');
         this.localHp = 100;
         this.localMaxHp = 100;
         this.localAlive = true;
@@ -444,10 +485,18 @@ export class HorrorGameEngine {
     this.mode = 'playing';
     this.paused = false;
     this.reloading = false;
+    this.medkitAnimTimer = 0;
+    this.medkitGroup.visible = false;
     this.viewModelAnchor.visible = true;
     this.flashlightOn = true;
-    this.flashlight.intensity = 14;
+    this.flashlight.intensity = 16;
     this.rebuildViewWeapon();
+  }
+
+  public playMedkitAnimation() {
+    this.medkitAnimTimer = 0.85;
+    this.medkitGroup.visible = true;
+    this.spawnBurst(this.playerPos.x, this.playerPos.y + 1.2, this.playerPos.z, 0x10b981, 14);
   }
 
   private spawnOrUpdateRemotePlayer(p: RemotePlayerData) {
@@ -557,9 +606,14 @@ export class HorrorGameEngine {
     this.waveState = state.waveState;
     this.matchElapsedSec = state.elapsedSec;
     this.monstersRemaining = state.monsters.length + state.remainingToSpawn;
+    if (state.pausedBy) this.pausedBy = state.pausedBy;
+    if (state.gameMode) this.gameMode = state.gameMode;
 
-    const hasBoss = state.monsters.some((m) => m.type === 'boss');
-    audioEngine.setBossMusic(hasBoss);
+    const bossMonster = state.monsters.find((m) => m.type === 'boss');
+    this.activeBoss = bossMonster
+      ? { name: 'Abomination Titan', hp: bossMonster.hp, maxHp: bossMonster.maxHp }
+      : null;
+    audioEngine.setBossMusic(Boolean(bossMonster));
 
     // Players
     for (const sp of state.players) {
@@ -711,17 +765,19 @@ export class HorrorGameEngine {
   }
 
   private spawnTracer(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, colorHex: number) {
-    const start = new THREE.Vector3(ox, oy, oz);
-    const end = new THREE.Vector3(ox + dx * 32, oy + dy * 32, oz + dz * 32);
-    const geo = new THREE.BufferGeometry().setFromPoints([start, end]);
-    const mat = new THREE.LineBasicMaterial({ color: colorHex, transparent: true, opacity: 0.85 });
-    const line = new THREE.Line(geo, mat);
-    this.scene.add(line);
-    this.tracers.push({ line, life: 0.08 });
+    const tr = this.tracers.find((t) => t.life <= 0) || this.tracers[0];
+    if (!tr) return;
+    const posAttr = tr.line.geometry.getAttribute('position') as THREE.BufferAttribute;
+    posAttr.setXYZ(0, ox, oy, oz);
+    posAttr.setXYZ(1, ox + dx * 32, oy + dy * 32, oz + dz * 32);
+    posAttr.needsUpdate = true;
+    (tr.line.material as THREE.LineBasicMaterial).color.setHex(colorHex);
+    tr.line.visible = true;
+    tr.life = 0.065;
   }
 
   private tryShoot() {
-    if (this.mode !== 'playing' || this.paused || !this.localAlive || this.reloading) return;
+    if (this.mode !== 'playing' || this.paused || this.pausedBy.length > 0 || !this.localAlive || this.reloading) return;
     if (this.fireCooldown > 0) return;
 
     const lvl = this.ownedWeapons[this.equippedWeapon]?.upgradeLevel || 1;
@@ -732,8 +788,9 @@ export class HorrorGameEngine {
       return;
     }
 
+    const modeRateMult = GAME_MODES[this.gameMode]?.fireRateMult || 1.0;
     this.ammoMap[this.equippedWeapon] = currentAmmo - 1;
-    this.fireCooldown = 1 / stats.fireRate;
+    this.fireCooldown = 1 / (stats.fireRate * modeRateMult);
     this.recoilOffset = Math.min(0.16, this.recoilOffset + stats.recoil);
     this.pitch = Math.min(1.35, this.pitch + stats.recoil * 0.28);
     this.shakeIntensity = Math.min(0.22, this.shakeIntensity + stats.recoil * 0.9);
@@ -787,25 +844,8 @@ export class HorrorGameEngine {
   }
 
   private resolvePlayerObstacles(x: number, z: number): { x: number; z: number } {
-    const map = MAPS[this.currentMapId];
-    const r = 0.55;
-    const limit = map.arenaHalfSize - r - 0.5;
-    let nx = Math.max(-limit, Math.min(limit, x));
-    let nz = Math.max(-limit, Math.min(limit, z));
-
-    for (const obs of map.obstacles) {
-      const hw = obs.w / 2 + r;
-      const hd = obs.d / 2 + r;
-      const dx = nx - obs.x;
-      const dz = nz - obs.z;
-      if (Math.abs(dx) < hw && Math.abs(dz) < hd) {
-        const penX = hw - Math.abs(dx);
-        const penZ = hd - Math.abs(dz);
-        if (penX < penZ) nx += dx >= 0 ? penX : -penX;
-        else nz += dz >= 0 ? penZ : -penZ;
-      }
-    }
-    return { x: nx, z: nz };
+    const pushed = resolveCircleObstacles(x, z, 0.55, MAPS[this.currentMapId]);
+    return { x: pushed.x, z: pushed.z };
   }
 
   private clearMatchEntities() {
@@ -982,12 +1022,13 @@ export class HorrorGameEngine {
     const lvl = this.ownedWeapons[this.equippedWeapon]?.upgradeLevel || 1;
     const wStats = getWeaponStatsAtLevel(this.equippedWeapon, lvl);
 
-    if (this.localAlive) {
+    if (this.localAlive && this.pausedBy.length === 0) {
       const forward = (this.heldKeys.has('KeyW') ? 1 : 0) - (this.heldKeys.has('KeyS') ? 1 : 0) - this.mobileMove.y;
       const strafe = (this.heldKeys.has('KeyD') ? 1 : 0) - (this.heldKeys.has('KeyA') ? 1 : 0) + this.mobileMove.x;
       const sprinting = this.heldKeys.has('ShiftLeft') || this.heldKeys.has('ShiftRight');
+      const modeSpeedMult = GAME_MODES[this.gameMode]?.playerSpeedMult || 1.0;
 
-      const speed = 7.4 * wStats.moveSpeedMult * (sprinting && !this.aiming ? 1.32 : this.aiming ? 0.68 : 1.0);
+      const speed = 7.6 * wStats.moveSpeedMult * modeSpeedMult * (sprinting && !this.aiming ? 1.32 : this.aiming ? 0.68 : 1.0);
       const len = Math.hypot(forward, strafe);
       if (len > 0.05) {
         const nf = forward / Math.max(1, len);
@@ -1021,7 +1062,7 @@ export class HorrorGameEngine {
       }
     }
 
-    // 2. Camera FOV (ADS zoom) & Shake
+    // 2. Camera FOV (ADS zoom), Shake & Zero-Roll Orientation
     const targetFov = this.aiming ? (this.equippedWeapon === 'sniper' ? 38 : 54) : 72;
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 14, dt);
@@ -1033,13 +1074,11 @@ export class HorrorGameEngine {
     const sy = (Math.random() - 0.5) * this.shakeIntensity * 0.25;
 
     this.camera.position.set(this.playerPos.x + sx, this.playerPos.y + 1.66 + sy, this.playerPos.z);
-    this.camera.rotation.order = 'YXZ';
-    this.camera.rotation.y = this.yaw;
-    this.camera.rotation.x = this.pitch;
+    this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
 
-    // 3. Shooting & Reloading
+    // 3. Shooting (hold to spam all guns) & Reloading
     if (this.fireCooldown > 0) this.fireCooldown -= dt;
-    if ((this.mouseDown || this.mobileShooting) && wStats.automatic) {
+    if (this.mouseDown || this.mobileShooting) {
       this.tryShoot();
     }
 
@@ -1051,11 +1090,22 @@ export class HorrorGameEngine {
       }
     }
 
-    // Viewmodel recoil & reload animation
+    // Viewmodel recoil, reload & medkit syringe animation
+    if (this.medkitAnimTimer > 0) {
+      this.medkitAnimTimer = Math.max(0, this.medkitAnimTimer - dt);
+      const p = 1 - this.medkitAnimTimer / 0.85;
+      const arch = Math.sin(p * Math.PI);
+      this.medkitGroup.visible = true;
+      this.medkitGroup.position.set(-0.18 + arch * 0.14, -0.45 + arch * 0.28, -0.46 + arch * 0.08);
+      this.medkitGroup.rotation.set(0.35 - arch * 0.6, 0.2, -0.45 + arch * 0.35);
+      if (this.medkitAnimTimer <= 0) this.medkitGroup.visible = false;
+    }
+
     this.recoilOffset = THREE.MathUtils.damp(this.recoilOffset, 0, 16, dt);
     if (this.viewWeapon) {
+      const dipForMedkit = this.medkitAnimTimer > 0 ? -0.18 : 0;
       const targetX = this.aiming ? 0.06 : 0.24;
-      const targetY = this.reloading ? -0.38 : this.aiming ? -0.17 : -0.22;
+      const targetY = (this.reloading ? -0.38 : this.aiming ? -0.17 : -0.22) + dipForMedkit;
       const targetZ = -0.45 + this.recoilOffset;
       this.viewWeapon.group.position.x = THREE.MathUtils.damp(this.viewWeapon.group.position.x, targetX, 16, dt);
       this.viewWeapon.group.position.y = THREE.MathUtils.damp(this.viewWeapon.group.position.y, targetY, 14, dt);
@@ -1093,17 +1143,19 @@ export class HorrorGameEngine {
 
     // 5. Monsters Interpolation, Limb Gait, Hit Flash & Billboard HP Bar
     for (const m of this.monsters.values()) {
-      m.model.group.position.x = THREE.MathUtils.damp(m.model.group.position.x, m.targetX, 10, dt);
-      m.model.group.position.z = THREE.MathUtils.damp(m.model.group.position.z, m.targetZ, 10, dt);
+      m.model.group.position.x = THREE.MathUtils.damp(m.model.group.position.x, m.targetX, 12, dt);
+      m.model.group.position.z = THREE.MathUtils.damp(m.model.group.position.z, m.targetZ, 12, dt);
       m.model.group.rotation.y = m.targetYaw;
 
-      m.walkPhase += dt * (m.type === 'runner' || m.type === 'crawler' ? 12 : 7);
-      m.model.leftLeg.rotation.x = Math.sin(m.walkPhase) * 0.45;
-      m.model.rightLeg.rotation.x = -Math.sin(m.walkPhase) * 0.45;
+      if (this.pausedBy.length === 0) {
+        m.walkPhase += dt * (m.type === 'runner' || m.type === 'crawler' || m.type === 'howler' ? 12 : 7);
+        m.model.leftLeg.rotation.x = Math.sin(m.walkPhase) * 0.45;
+        m.model.rightLeg.rotation.x = -Math.sin(m.walkPhase) * 0.45;
 
-      const armSwing = m.attacking ? -0.9 : Math.sin(m.walkPhase) * 0.25;
-      m.model.leftArm.rotation.x = armSwing;
-      m.model.rightArm.rotation.x = m.attacking ? -0.9 : -armSwing;
+        const armSwing = m.attacking ? -0.9 : Math.sin(m.walkPhase) * 0.25;
+        m.model.leftArm.rotation.x = armSwing;
+        m.model.rightArm.rotation.x = m.attacking ? -0.9 : -armSwing;
+      }
 
       // Hit flash feedback
       const flashing = now < m.hitFlashUntil;
@@ -1114,10 +1166,19 @@ export class HorrorGameEngine {
           mat.emissiveIntensity = 0.8;
         } else if (m.type === 'boss') {
           mat.emissive.setHex(0x450a0a);
-          mat.emissiveIntensity = 0.45;
+          mat.emissiveIntensity = 0.5;
         } else if (m.type === 'phantom') {
           mat.emissive.setHex(0x312e81);
           mat.emissiveIntensity = 0.7;
+        } else if (m.type === 'spitter') {
+          mat.emissive.setHex(0x14532d);
+          mat.emissiveIntensity = 0.35;
+        } else if (m.type === 'howler') {
+          mat.emissive.setHex(0x581c87);
+          mat.emissiveIntensity = 0.35;
+        } else if (m.type === 'sentinel') {
+          mat.emissive.setHex(0x78350f);
+          mat.emissiveIntensity = 0.35;
         } else {
           mat.emissive.setHex(0x000000);
           mat.emissiveIntensity = 0;
@@ -1134,7 +1195,7 @@ export class HorrorGameEngine {
       c.mesh.position.y = 0.55 + Math.sin(this.elapsed * 4 + c.x) * 0.1;
     }
 
-    // 7. Update Pooled Particles & Tracers
+    // 7. Update Pooled Particles & Pooled Tracers (Zero GC)
     for (const p of this.particlePool) {
       if (p.life > 0) {
         p.life -= dt;
@@ -1147,14 +1208,10 @@ export class HorrorGameEngine {
       }
     }
 
-    for (let i = this.tracers.length - 1; i >= 0; i--) {
-      const tr = this.tracers[i];
-      tr.life -= dt;
-      if (tr.life <= 0) {
-        this.scene.remove(tr.line);
-        tr.line.geometry.dispose();
-        (tr.line.material as THREE.Material).dispose();
-        this.tracers.splice(i, 1);
+    for (const tr of this.tracers) {
+      if (tr.life > 0) {
+        tr.life -= dt;
+        if (tr.life <= 0) tr.line.visible = false;
       }
     }
 
@@ -1198,6 +1255,9 @@ export class HorrorGameEngine {
         monstersRemaining: this.monstersRemaining,
         flashlightOn: this.flashlightOn,
         pointerLocked: document.pointerLockElement === this.renderer.domElement,
+        gameMode: this.gameMode,
+        pausedBy: this.pausedBy,
+        boss: this.activeBoss,
         teammate: firstMate
           ? {
               username: firstMate.data.username,

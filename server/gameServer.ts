@@ -3,15 +3,24 @@ import type { Server as HttpServer } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   DIFFICULTIES,
+  GAME_MODES,
   getWeaponStatsAtLevel,
   HEALTH_PURCHASE_AMOUNT,
   HEALTH_PURCHASE_COST,
   MAPS,
   MAX_HEALTH_PURCHASES_PER_MATCH,
   MONSTERS,
+  resolveCircleObstacles,
   WEAPONS,
 } from '../src/shared/gameData.ts';
-import type { DifficultyId, EquippedLoadout, MapId, MonsterType, WeaponId } from '../src/shared/gameData.ts';
+import type {
+  DifficultyId,
+  EquippedLoadout,
+  GameModeId,
+  MapId,
+  MonsterType,
+  WeaponId,
+} from '../src/shared/gameData.ts';
 import { db, getFullProfileById, getProfileByToken, recordMatchResult, spendMatchHealthCoin } from './db.ts';
 
 interface ClientConn {
@@ -71,6 +80,7 @@ interface ActiveMonster {
   scoreReward: number;
   xpReward: number;
   attackAnimUntil: number;
+  strafeSign: number;
 }
 
 interface GroundCoin {
@@ -81,17 +91,32 @@ interface GroundCoin {
   createdAt: number;
 }
 
+interface RoomVoteState {
+  endsAt: number;
+  mapCandidates: MapId[];
+  modeCandidates: GameModeId[];
+  mapVotes: Map<string, MapId>;
+  modeVotes: Map<string, GameModeId>;
+  timer?: NodeJS.Timeout;
+}
+
 interface GameRoom {
   id: string;
   hostId: string;
   mapId: MapId;
   difficulty: DifficultyId;
+  gameMode: GameModeId;
   isPublicMatchmaking: boolean;
-  status: 'waiting' | 'playing' | 'finished';
+  status: 'waiting' | 'voting' | 'playing' | 'finished';
   players: Map<string, RoomPlayerState>;
+  // Pause state
+  pausedPlayers: Map<string, string>;
+  pausedSince: number | null;
+  // Vote state
+  voteState: RoomVoteState | null;
   // Match state
   wave: number;
-  maxWaves: number;
+  maxWaves: number; // 0 = unlimited
   waveState: 'combat' | 'intermission';
   intermissionEndsAt: number;
   monstersToSpawn: MonsterType[];
@@ -138,6 +163,7 @@ function serializeRoom(room: GameRoom) {
     hostId: room.hostId,
     mapId: room.mapId,
     difficulty: room.difficulty,
+    gameMode: room.gameMode,
     isPublicMatchmaking: room.isPublicMatchmaking,
     status: room.status,
     maxPlayers: 2,
@@ -155,72 +181,288 @@ function serializeRoom(room: GameRoom) {
   };
 }
 
-function buildWaveQueue(wave: number, playerCount: number): MonsterType[] {
-  const count = Math.round((5 + wave * 3) * (playerCount === 2 ? 1.35 : 1));
+function serializeVoteState(room: GameRoom) {
+  if (!room.voteState) return null;
+  const mapVotes: Record<string, MapId> = {};
+  for (const [pid, mid] of room.voteState.mapVotes.entries()) mapVotes[pid] = mid;
+  const modeVotes: Record<string, GameModeId> = {};
+  for (const [pid, moid] of room.voteState.modeVotes.entries()) modeVotes[pid] = moid;
+
+  return {
+    roomId: room.id,
+    endsAt: room.voteState.endsAt,
+    mapCandidates: room.voteState.mapCandidates,
+    modeCandidates: room.voteState.modeCandidates,
+    mapVotes,
+    modeVotes,
+    voters: Array.from(room.players.values()).map((p) => ({
+      playerId: p.playerId,
+      username: p.username,
+    })),
+  };
+}
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function pickVoteCandidates(currentMap: MapId): {
+  mapCandidates: MapId[];
+  modeCandidates: GameModeId[];
+} {
+  const allMaps = Object.keys(MAPS) as MapId[];
+  const otherMaps = shuffleArray(allMaps.filter((m) => m !== currentMap));
+  const mapCandidates = shuffleArray([currentMap, ...otherMaps.slice(0, 2)]);
+
+  const allModes = Object.keys(GAME_MODES) as GameModeId[];
+  const modeCandidates = shuffleArray(allModes).slice(0, 3);
+  if (!modeCandidates.includes('unlimited')) {
+    modeCandidates[0] = 'unlimited';
+  }
+  return { mapCandidates, modeCandidates };
+}
+
+function tallyWinner<T extends string>(candidates: T[], votes: Map<string, T>, fallback: T): T {
+  if (votes.size === 0) return candidates[0] || fallback;
+  const counts = new Map<T, number>();
+  for (const c of candidates) counts.set(c, 0);
+  for (const v of votes.values()) {
+    if (counts.has(v)) counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  let bestCount = -1;
+  let tied: T[] = [];
+  for (const c of candidates) {
+    const cnt = counts.get(c) || 0;
+    if (cnt > bestCount) {
+      bestCount = cnt;
+      tied = [c];
+    } else if (cnt === bestCount) {
+      tied.push(c);
+    }
+  }
+  return tied[crypto.randomInt(0, tied.length)] || fallback;
+}
+
+function beginRoomVote(room: GameRoom) {
+  if (room.voteState?.timer) {
+    clearTimeout(room.voteState.timer);
+  }
+  const { mapCandidates, modeCandidates } = pickVoteCandidates(room.mapId);
+  room.status = 'voting';
+  room.voteState = {
+    endsAt: Date.now() + 14000,
+    mapCandidates,
+    modeCandidates,
+    mapVotes: new Map(),
+    modeVotes: new Map(),
+  };
+
+  room.voteState.timer = setTimeout(() => {
+    finalizeRoomVote(room);
+  }, 14000);
+
+  broadcastRoom(room, 'room:vote_started', serializeVoteState(room));
+}
+
+function finalizeRoomVote(room: GameRoom) {
+  if (!room.voteState || room.status !== 'voting') return;
+  if (room.voteState.timer) {
+    clearTimeout(room.voteState.timer);
+    room.voteState.timer = undefined;
+  }
+  const chosenMap = tallyWinner(room.voteState.mapCandidates, room.voteState.mapVotes, room.mapId);
+  const chosenMode = tallyWinner(room.voteState.modeCandidates, room.voteState.modeVotes, room.gameMode);
+  room.mapId = chosenMap;
+  room.gameMode = chosenMode;
+  room.voteState = null;
+
+  db.prepare('UPDATE rooms SET map_id = ? WHERE id = ?').run(room.mapId, room.id);
+  broadcastRoom(room, 'room:updated', serializeRoom(room));
+
+  // Refresh loadouts & start
+  for (const rp of room.players.values()) {
+    const fp = getFullProfileById(rp.playerId);
+    if (fp) {
+      rp.weaponId = fp.equippedWeapon;
+      rp.loadout = fp.equippedLoadout;
+      const wl: Record<string, number> = {};
+      for (const [wid, info] of Object.entries(fp.weapons)) wl[wid] = info.upgradeLevel;
+      rp.weaponLevels = wl;
+    }
+  }
+  startMatchLoop(room);
+}
+
+function buildWaveQueue(wave: number, playerCount: number, gameMode: GameModeId): MonsterType[] {
+  const modeCountMult = gameMode === 'blitz' ? 1.32 : gameMode === 'boss_rush' ? 0.92 : 1.0;
+  const count = Math.round((6 + wave * 3.2) * (playerCount === 2 ? 1.35 : 1) * modeCountMult);
   const queue: MonsterType[] = [];
 
   for (let i = 0; i < count; i++) {
     const r = Math.random();
+    if (gameMode === 'boss_rush') {
+      if (r < 0.25) queue.push('brute');
+      else if (r < 0.48) queue.push('sentinel');
+      else if (r < 0.68) queue.push('howler');
+      else if (r < 0.85) queue.push('spitter');
+      else queue.push('phantom');
+      continue;
+    }
+
     if (wave === 1) {
-      queue.push(r < 0.65 ? 'zombie' : 'runner');
-    } else if (wave === 2) {
-      if (r < 0.4) queue.push('zombie');
-      else if (r < 0.75) queue.push('runner');
+      if (r < 0.55) queue.push('zombie');
+      else if (r < 0.85) queue.push('runner');
       else queue.push('crawler');
+    } else if (wave === 2) {
+      if (r < 0.3) queue.push('zombie');
+      else if (r < 0.6) queue.push('runner');
+      else if (r < 0.85) queue.push('crawler');
+      else queue.push('spitter');
     } else if (wave <= 4) {
-      if (r < 0.25) queue.push('zombie');
-      else if (r < 0.5) queue.push('runner');
-      else if (r < 0.75) queue.push('crawler');
-      else if (r < 0.92) queue.push('brute');
+      if (r < 0.18) queue.push('zombie');
+      else if (r < 0.36) queue.push('runner');
+      else if (r < 0.52) queue.push('crawler');
+      else if (r < 0.68) queue.push('spitter');
+      else if (r < 0.82) queue.push('howler');
+      else if (r < 0.93) queue.push('brute');
       else queue.push('phantom');
     } else {
-      if (r < 0.2) queue.push('runner');
-      else if (r < 0.4) queue.push('crawler');
-      else if (r < 0.7) queue.push('brute');
+      if (r < 0.16) queue.push('runner');
+      else if (r < 0.3) queue.push('crawler');
+      else if (r < 0.45) queue.push('spitter');
+      else if (r < 0.6) queue.push('howler');
+      else if (r < 0.75) queue.push('brute');
+      else if (r < 0.88) queue.push('sentinel');
       else queue.push('phantom');
     }
   }
 
-  if (wave % 3 === 0) {
+  // Boss Fight every 5 waves!
+  const bossInterval = GAME_MODES[gameMode]?.bossInterval || 5;
+  if (wave % bossInterval === 0) {
     queue.push('boss');
+    if (gameMode === 'boss_rush' && wave >= 10) {
+      queue.push('boss');
+    }
   }
   return queue;
 }
 
-function resolveObstaclePush(mapId: MapId, x: number, z: number, radius: number): { x: number; z: number } {
+function moveMonsterWithObstacles(
+  m: ActiveMonster,
+  targetX: number,
+  targetZ: number,
+  stepDist: number,
+  mapId: MapId
+) {
   const map = MAPS[mapId];
-  const limit = map.arenaHalfSize - radius - 0.5;
-  let nx = Math.max(-limit, Math.min(limit, x));
-  let nz = Math.max(-limit, Math.min(limit, z));
+  const start = resolveCircleObstacles(m.x, m.z, m.radius, map);
+  m.x = start.x;
+  m.z = start.z;
 
-  for (const obs of map.obstacles) {
-    const hw = obs.w / 2 + radius;
-    const hd = obs.d / 2 + radius;
-    const dx = nx - obs.x;
-    const dz = nz - obs.z;
-    if (Math.abs(dx) < hw && Math.abs(dz) < hd) {
-      const penX = hw - Math.abs(dx);
-      const penZ = hd - Math.abs(dz);
-      if (penX < penZ) {
-        nx += dx >= 0 ? penX : -penX;
-      } else {
-        nz += dz >= 0 ? penZ : -penZ;
+  const dx = targetX - m.x;
+  const dz = targetZ - m.z;
+  const dist = Math.hypot(dx, dz) || 0.001;
+  const ux = dx / dist;
+  const uz = dz / dist;
+
+  // Direct attempt
+  const direct = resolveCircleObstacles(m.x + ux * stepDist, m.z + uz * stepDist, m.radius, map);
+  const directProgress = (direct.x - m.x) * ux + (direct.z - m.z) * uz;
+
+  if (!direct.collided || directProgress >= stepDist * 0.45) {
+    m.x = direct.x;
+    m.z = direct.z;
+    return;
+  }
+
+  // Blocked by wall/pillar: probe tangential angles around obstacle smoothly
+  const s = m.strafeSign || 1;
+  const probeAngles = [
+    s * 0.75,
+    -s * 0.75,
+    s * 1.35,
+    -s * 1.35,
+    s * 1.85,
+    -s * 1.85,
+  ];
+
+  let bestX = direct.x;
+  let bestZ = direct.z;
+  let bestScore = -Infinity;
+  let chosenSign = s;
+
+  for (const ang of probeAngles) {
+    const cos = Math.cos(ang);
+    const sin = Math.sin(ang);
+    const rx = ux * cos - uz * sin;
+    const rz = ux * sin + uz * cos;
+    const cand = resolveCircleObstacles(m.x + rx * stepDist, m.z + rz * stepDist, m.radius, map);
+    const movedDist = Math.hypot(cand.x - m.x, cand.z - m.z);
+    if (movedDist < stepDist * 0.25) continue;
+
+    // Score prefers reducing distance to player while actually moving cleanly
+    const newDist = Math.hypot(targetX - cand.x, targetZ - cand.z);
+    const distGain = dist - newDist;
+    const score = distGain + movedDist * 0.65 - (cand.collided ? 0.15 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestX = cand.x;
+      bestZ = cand.z;
+      chosenSign = ang >= 0 ? 1 : -1;
+    }
+  }
+
+  m.strafeSign = chosenSign;
+  m.x = bestX;
+  m.z = bestZ;
+}
+
+function applyMonsterSeparation(monsters: Map<string, ActiveMonster>, mapId: MapId) {
+  const map = MAPS[mapId];
+  const arr = Array.from(monsters.values());
+  for (let i = 0; i < arr.length; i++) {
+    const a = arr[i];
+    for (let j = i + 1; j < arr.length; j++) {
+      const b = arr[j];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const d = Math.hypot(dx, dz);
+      const minSep = (a.radius + b.radius) * 0.85;
+      if (d > 0.0001 && d < minSep) {
+        const push = (minSep - d) * 0.35;
+        const nx = dx / d;
+        const nz = dz / d;
+        const pa = resolveCircleObstacles(a.x - nx * push, a.z - nz * push, a.radius, map);
+        const pb = resolveCircleObstacles(b.x + nx * push, b.z + nz * push, b.radius, map);
+        a.x = pa.x;
+        a.z = pa.z;
+        b.x = pb.x;
+        b.z = pb.z;
       }
     }
   }
-  return { x: nx, z: nz };
 }
 
 function startMatchLoop(room: GameRoom) {
   const map = MAPS[room.mapId];
+  const modeDef = GAME_MODES[room.gameMode] || GAME_MODES.unlimited;
+
   room.status = 'playing';
   room.wave = 1;
-  room.maxWaves = 6; // Defeat Wave 6 Boss to win!
+  room.maxWaves = 0; // Unlimited waves!
   room.waveState = 'intermission';
   room.intermissionEndsAt = Date.now() + 2500;
   room.monsters.clear();
   room.coins.clear();
-  room.monstersToSpawn = buildWaveQueue(1, room.players.size);
+  room.pausedPlayers.clear();
+  room.pausedSince = null;
+  room.monstersToSpawn = buildWaveQueue(1, room.players.size, room.gameMode);
   room.lastSpawnAt = 0;
   room.matchStartedAt = Date.now();
 
@@ -253,6 +495,7 @@ function startMatchLoop(room: GameRoom) {
     roomId: room.id,
     mapId: room.mapId,
     difficulty: room.difficulty,
+    gameMode: room.gameMode,
     maxWaves: room.maxWaves,
     players: Array.from(room.players.values()),
   });
@@ -270,6 +513,9 @@ function startMatchLoop(room: GameRoom) {
     const dt = Math.min((now - lastTick) / 1000, 0.1);
     lastTick = now;
 
+    const pausedBy = Array.from(room.pausedPlayers.values());
+    const isPaused = pausedBy.length > 0;
+
     // 1. Check all players dead
     const alivePlayers = Array.from(room.players.values()).filter((p) => p.alive);
     if (alivePlayers.length === 0) {
@@ -277,133 +523,146 @@ function startMatchLoop(room: GameRoom) {
       return;
     }
 
-    // 2. Wave progression
-    if (room.waveState === 'intermission') {
-      if (now >= room.intermissionEndsAt) {
-        room.waveState = 'combat';
-        broadcastRoom(room, 'match:wave', {
-          wave: room.wave,
-          isBossWave: room.wave % 3 === 0,
-        });
-      }
-    } else {
-      // Spawn monsters gradually
-      if (room.monstersToSpawn.length > 0 && now - room.lastSpawnAt >= 750 && room.monsters.size < 22) {
-        const mType = room.monstersToSpawn.shift()!;
-        const sp = map.monsterSpawns[crypto.randomInt(0, map.monsterSpawns.length)];
-        const mDef = MONSTERS[mType];
-        const diff = DIFFICULTIES[room.difficulty];
-        const waveScale = 1 + (room.wave - 1) * 0.18;
-        const coopScale = room.players.size === 2 && mType === 'boss' ? 1.45 : 1.0;
-
-        const maxHp = Math.round(mDef.hp * diff.hpMult * waveScale * coopScale);
-        const monster: ActiveMonster = {
-          id: crypto.randomUUID(),
-          type: mType,
-          x: sp[0] + (Math.random() - 0.5) * 2,
-          z: sp[1] + (Math.random() - 0.5) * 2,
-          yaw: 0,
-          hp: maxHp,
-          maxHp,
-          speed: mDef.speed * diff.speedMult * (1 + Math.min(0.25, (room.wave - 1) * 0.03)),
-          damage: Math.round(mDef.damage * diff.dmgMult),
-          attackRange: mDef.attackRange,
-          attackCooldown: mDef.attackCooldown,
-          lastAttackAt: 0,
-          radius: mDef.radius,
-          coinReward: Math.round(mDef.coinReward * diff.rewardMult),
-          scoreReward: Math.round(mDef.scoreReward * diff.rewardMult),
-          xpReward: Math.round(mDef.xpReward * diff.rewardMult),
-          attackAnimUntil: 0,
-        };
-        room.monsters.set(monster.id, monster);
-        room.lastSpawnAt = now;
-      }
-
-      // Check wave clear
-      if (room.monstersToSpawn.length === 0 && room.monsters.size === 0) {
-        if (room.wave >= room.maxWaves) {
-          finishMatch(room, true);
-          return;
-        }
-        room.wave += 1;
-        room.waveState = 'intermission';
-        room.intermissionEndsAt = now + 4000;
-        room.monstersToSpawn = buildWaveQueue(room.wave, room.players.size);
-
-        // Spawn bonus cache coins on wave clear
-        for (const sc of map.supplyCaches) {
-          const cid = crypto.randomUUID();
-          room.coins.set(cid, { id: cid, x: sc[0], z: sc[1], value: 25, createdAt: now });
-        }
-        // Small wave clear heal for alive players
-        for (const p of alivePlayers) {
-          p.hp = Math.min(p.maxHp, p.hp + 15);
-        }
-        broadcastRoom(room, 'match:wave_cleared', { nextWave: room.wave });
-      }
-    }
-
-    // 3. Update Monsters AI
-    for (const m of room.monsters.values()) {
-      let nearest: RoomPlayerState | null = null;
-      let bestDist = Infinity;
-      for (const p of alivePlayers) {
-        const d = Math.hypot(p.x - m.x, p.z - m.z);
-        if (d < bestDist) {
-          bestDist = d;
-          nearest = p;
-        }
-      }
-      if (!nearest) continue;
-
-      const dx = nearest.x - m.x;
-      const dz = nearest.z - m.z;
-      m.yaw = Math.atan2(dx, dz);
-
-      if (bestDist > m.attackRange * 0.85) {
-        const vx = (dx / (bestDist || 1)) * m.speed * dt;
-        const vz = (dz / (bestDist || 1)) * m.speed * dt;
-        const pushed = resolveObstaclePush(room.mapId, m.x + vx, m.z + vz, m.radius);
-        m.x = pushed.x;
-        m.z = pushed.z;
-      }
-
-      // Attack player
-      if (bestDist <= m.attackRange && now - m.lastAttackAt >= m.attackCooldown * 1000) {
-        m.lastAttackAt = now;
-        m.attackAnimUntil = now + 350;
-        nearest.hp = Math.max(0, nearest.hp - m.damage);
-        if (nearest.hp <= 0) {
-          nearest.alive = false;
-        }
-        broadcastRoom(room, 'match:player_hit', {
-          playerId: nearest.playerId,
-          damage: m.damage,
-          hp: nearest.hp,
-          alive: nearest.alive,
-          attackerType: m.type,
-        });
-      }
-    }
-
-    // 4. Auto-collect nearby coins
-    for (const [cid, coin] of room.coins.entries()) {
-      if (now - coin.createdAt > 45000) {
-        room.coins.delete(cid);
-        continue;
-      }
-      for (const p of alivePlayers) {
-        if (Math.hypot(p.x - coin.x, p.z - coin.z) <= 2.3) {
-          room.coins.delete(cid);
-          p.coinsEarned += coin.value;
-          p.score += coin.value * 5;
-          broadcastRoom(room, 'match:coin_collected', {
-            coinId: cid,
-            playerId: p.playerId,
-            value: coin.value,
+    if (!isPaused) {
+      // 2. Wave progression
+      if (room.waveState === 'intermission') {
+        if (now >= room.intermissionEndsAt) {
+          room.waveState = 'combat';
+          broadcastRoom(room, 'match:wave', {
+            wave: room.wave,
+            isBossWave: room.wave % (modeDef.bossInterval || 5) === 0,
           });
-          break;
+        }
+      } else {
+        // Spawn monsters gradually
+        if (
+          room.monstersToSpawn.length > 0 &&
+          now - room.lastSpawnAt >= modeDef.spawnIntervalMs &&
+          room.monsters.size < 26
+        ) {
+          const mType = room.monstersToSpawn.shift()!;
+          const sp = map.monsterSpawns[crypto.randomInt(0, map.monsterSpawns.length)];
+          const mDef = MONSTERS[mType];
+          const diff = DIFFICULTIES[room.difficulty];
+          const waveScale = 1 + (room.wave - 1) * 0.16;
+          const coopScale = room.players.size === 2 && mType === 'boss' ? 1.45 : 1.0;
+
+          const spawnResolved = resolveCircleObstacles(
+            sp[0] + (Math.random() - 0.5) * 1.5,
+            sp[1] + (Math.random() - 0.5) * 1.5,
+            mDef.radius,
+            map
+          );
+
+          const maxHp = Math.round(mDef.hp * diff.hpMult * modeDef.hpMult * waveScale * coopScale);
+          const monster: ActiveMonster = {
+            id: crypto.randomUUID(),
+            type: mType,
+            x: spawnResolved.x,
+            z: spawnResolved.z,
+            yaw: 0,
+            hp: maxHp,
+            maxHp,
+            speed:
+              mDef.speed *
+              diff.speedMult *
+              modeDef.speedMult *
+              (1 + Math.min(0.32, (room.wave - 1) * 0.025)),
+            damage: Math.round(mDef.damage * diff.dmgMult),
+            attackRange: mDef.attackRange,
+            attackCooldown: mDef.attackCooldown,
+            lastAttackAt: 0,
+            radius: mDef.radius,
+            coinReward: Math.round(mDef.coinReward * diff.rewardMult * modeDef.rewardMult),
+            scoreReward: Math.round(mDef.scoreReward * diff.rewardMult * modeDef.rewardMult),
+            xpReward: Math.round(mDef.xpReward * diff.rewardMult * modeDef.rewardMult),
+            attackAnimUntil: 0,
+            strafeSign: Math.random() < 0.5 ? 1 : -1,
+          };
+          room.monsters.set(monster.id, monster);
+          room.lastSpawnAt = now;
+        }
+
+        // Check wave clear -> advance endlessly!
+        if (room.monstersToSpawn.length === 0 && room.monsters.size === 0) {
+          room.wave += 1;
+          room.waveState = 'intermission';
+          room.intermissionEndsAt = now + 4000;
+          room.monstersToSpawn = buildWaveQueue(room.wave, room.players.size, room.gameMode);
+
+          // Spawn bonus cache coins on wave clear
+          for (const sc of map.supplyCaches) {
+            const cid = crypto.randomUUID();
+            room.coins.set(cid, { id: cid, x: sc[0], z: sc[1], value: 25, createdAt: now });
+          }
+          // Wave clear heal
+          for (const p of alivePlayers) {
+            p.hp = Math.min(p.maxHp, p.hp + 18);
+          }
+          broadcastRoom(room, 'match:wave_cleared', { nextWave: room.wave });
+        }
+      }
+
+      // 3. Update Monsters AI (obstacle-aware steering + NPC invulnerability while paused)
+      for (const m of room.monsters.values()) {
+        let nearest: RoomPlayerState | null = null;
+        let bestDist = Infinity;
+        for (const p of alivePlayers) {
+          const d = Math.hypot(p.x - m.x, p.z - m.z);
+          if (d < bestDist) {
+            bestDist = d;
+            nearest = p;
+          }
+        }
+        if (!nearest) continue;
+
+        const dx = nearest.x - m.x;
+        const dz = nearest.z - m.z;
+        m.yaw = Math.atan2(dx, dz);
+
+        if (bestDist > m.attackRange * 0.85) {
+          const step = Math.min(bestDist, m.speed * dt);
+          moveMonsterWithObstacles(m, nearest.x, nearest.z, step, room.mapId);
+        }
+
+        // Attack player
+        if (bestDist <= m.attackRange && now - m.lastAttackAt >= m.attackCooldown * 1000) {
+          m.lastAttackAt = now;
+          m.attackAnimUntil = now + 350;
+          nearest.hp = Math.max(0, nearest.hp - m.damage);
+          if (nearest.hp <= 0) {
+            nearest.alive = false;
+          }
+          broadcastRoom(room, 'match:player_hit', {
+            playerId: nearest.playerId,
+            damage: m.damage,
+            hp: nearest.hp,
+            alive: nearest.alive,
+            attackerType: m.type,
+          });
+        }
+      }
+
+      applyMonsterSeparation(room.monsters, room.mapId);
+
+      // 4. Auto-collect nearby coins
+      for (const [cid, coin] of room.coins.entries()) {
+        if (now - coin.createdAt > 45000) {
+          room.coins.delete(cid);
+          continue;
+        }
+        for (const p of alivePlayers) {
+          if (Math.hypot(p.x - coin.x, p.z - coin.z) <= 2.3) {
+            room.coins.delete(cid);
+            p.coinsEarned += coin.value;
+            p.score += coin.value * 5;
+            broadcastRoom(room, 'match:coin_collected', {
+              coinId: cid,
+              playerId: p.playerId,
+              value: coin.value,
+            });
+            break;
+          }
         }
       }
     }
@@ -411,11 +670,13 @@ function startMatchLoop(room: GameRoom) {
     // 5. Broadcast authoritative snapshot
     broadcastRoom(room, 'match:state', {
       t: now,
-      elapsedSec: Math.floor((now - room.matchStartedAt) / 1000),
+      elapsedSec: Math.floor(((room.pausedSince ?? now) - room.matchStartedAt) / 1000),
       wave: room.wave,
       maxWaves: room.maxWaves,
       waveState: room.waveState,
       remainingToSpawn: room.monstersToSpawn.length,
+      pausedBy,
+      gameMode: room.gameMode,
       players: Array.from(room.players.values()).map((p) => ({
         playerId: p.playerId,
         x: p.x,
@@ -441,7 +702,7 @@ function startMatchLoop(room: GameRoom) {
         yaw: m.yaw,
         hp: m.hp,
         maxHp: m.maxHp,
-        attacking: now < m.attackAnimUntil,
+        attacking: !isPaused && now < m.attackAnimUntil,
       })),
       coins: Array.from(room.coins.values()),
     });
@@ -451,18 +712,21 @@ function startMatchLoop(room: GameRoom) {
 function finishMatch(room: GameRoom, victory: boolean) {
   if (room.status === 'finished') return;
   room.status = 'finished';
+  room.pausedPlayers.clear();
+  room.pausedSince = null;
   if (room.tickTimer) {
     clearInterval(room.tickTimer);
     room.tickTimer = undefined;
   }
 
   const durationSeconds = Math.max(1, Math.floor((Date.now() - room.matchStartedAt) / 1000));
-  const wavesCleared = victory ? room.maxWaves : Math.max(0, room.wave - 1);
+  const wavesCleared = Math.max(0, room.wave - 1);
   const diff = DIFFICULTIES[room.difficulty];
+  const modeDef = GAME_MODES[room.gameMode] || GAME_MODES.unlimited;
 
   const playerSummaries = Array.from(room.players.values()).map((p) => {
-    const survivalBonusCoins = victory ? Math.round(150 * diff.rewardMult) : Math.round(wavesCleared * 15);
-    const survivalBonusXp = victory ? Math.round(160 * diff.rewardMult) : Math.round(wavesCleared * 20);
+    const survivalBonusCoins = Math.round(wavesCleared * 25 * diff.rewardMult * modeDef.rewardMult);
+    const survivalBonusXp = Math.round(wavesCleared * 30 * diff.rewardMult * modeDef.rewardMult);
     const totalCoins = p.coinsEarned + survivalBonusCoins;
     const totalXp = p.xpEarned + survivalBonusXp;
 
@@ -485,7 +749,7 @@ function finishMatch(room: GameRoom, victory: boolean) {
       mapId: room.mapId,
       difficulty: room.difficulty,
       wavesCleared,
-      victory,
+      victory: victory || wavesCleared >= 5,
       durationSeconds,
       players: playerSummaries,
     });
@@ -502,7 +766,7 @@ function finishMatch(room: GameRoom, victory: boolean) {
     if (conn) {
       const updatedProfile = getFullProfileById(p.playerId);
       send(conn.ws, 'match:ended', {
-        victory,
+        victory: victory || wavesCleared >= 5,
         wavesCleared,
         durationSeconds,
         results: playerSummaries,
@@ -521,10 +785,23 @@ function handleLeaveRoom(conn: ClientConn) {
   if (!room) return;
 
   room.players.delete(conn.playerId);
+  if (room.pausedPlayers.has(conn.playerId)) {
+    room.pausedPlayers.delete(conn.playerId);
+    if (room.pausedPlayers.size === 0 && room.pausedSince) {
+      const pausedDelta = Date.now() - room.pausedSince;
+      room.intermissionEndsAt += pausedDelta;
+      room.matchStartedAt += pausedDelta;
+      room.lastSpawnAt += pausedDelta;
+      for (const c of room.coins.values()) c.createdAt += pausedDelta;
+      room.pausedSince = null;
+    }
+  }
+
   db.prepare('DELETE FROM room_members WHERE room_id = ? AND player_id = ?').run(room.id, conn.playerId);
 
   if (room.players.size === 0) {
     if (room.tickTimer) clearInterval(room.tickTimer);
+    if (room.voteState?.timer) clearTimeout(room.voteState.timer);
     rooms.delete(room.id);
     db.prepare('DELETE FROM rooms WHERE id = ?').run(room.id);
   } else {
@@ -673,18 +950,27 @@ export function setupGameWebSocket(server: HttpServer) {
           while (rooms.has(code)) code = generateRoomCode();
 
           const mapId: MapId = MAPS[payload.mapId as MapId] ? payload.mapId : 'hospital';
-          const difficulty: DifficultyId = DIFFICULTIES[payload.difficulty as DifficultyId] ? payload.difficulty : 'normal';
+          const difficulty: DifficultyId = DIFFICULTIES[payload.difficulty as DifficultyId]
+            ? payload.difficulty
+            : 'normal';
+          const gameMode: GameModeId = GAME_MODES[payload.gameMode as GameModeId]
+            ? payload.gameMode
+            : 'unlimited';
 
           const room: GameRoom = {
             id: code,
             hostId: conn.playerId,
             mapId,
             difficulty,
+            gameMode,
             isPublicMatchmaking: Boolean(payload.isPublic),
             status: 'waiting',
             players: new Map([[conn.playerId, buildRoomMember()]]),
+            pausedPlayers: new Map(),
+            pausedSince: null,
+            voteState: null,
             wave: 1,
-            maxWaves: 6,
+            maxWaves: 0,
             waveState: 'intermission',
             intermissionEndsAt: 0,
             monstersToSpawn: [],
@@ -696,14 +982,13 @@ export function setupGameWebSocket(server: HttpServer) {
           rooms.set(code, room);
           conn.roomId = code;
 
-          db.prepare('INSERT OR REPLACE INTO rooms (id, host_id, map_id, difficulty, status, max_players) VALUES (?, ?, ?, ?, ?, 2)').run(
+          db.prepare(
+            'INSERT OR REPLACE INTO rooms (id, host_id, map_id, difficulty, status, max_players) VALUES (?, ?, ?, ?, ?, 2)'
+          ).run(code, conn.playerId, mapId, difficulty, 'waiting');
+          db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(
             code,
-            conn.playerId,
-            mapId,
-            difficulty,
-            'waiting'
+            conn.playerId
           );
-          db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(code, conn.playerId);
 
           send(ws, 'room:joined', serializeRoom(room));
           break;
@@ -728,7 +1013,10 @@ export function setupGameWebSocket(server: HttpServer) {
           handleLeaveRoom(conn);
           room.players.set(conn.playerId, buildRoomMember());
           conn.roomId = room.id;
-          db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(room.id, conn.playerId);
+          db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(
+            room.id,
+            conn.playerId
+          );
 
           send(ws, 'room:joined', serializeRoom(room));
           broadcastRoom(room, 'room:updated', serializeRoom(room), conn.playerId);
@@ -736,7 +1024,6 @@ export function setupGameWebSocket(server: HttpServer) {
         }
 
         case 'room:find_player': {
-          // Find an existing waiting room with 1 player
           let openRoom: GameRoom | undefined;
           for (const r of rooms.values()) {
             if (r.status === 'waiting' && r.players.size === 1 && !r.players.has(conn.playerId)) {
@@ -749,26 +1036,34 @@ export function setupGameWebSocket(server: HttpServer) {
             handleLeaveRoom(conn);
             openRoom.players.set(conn.playerId, buildRoomMember());
             conn.roomId = openRoom.id;
-            db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(openRoom.id, conn.playerId);
+            db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(
+              openRoom.id,
+              conn.playerId
+            );
             send(ws, 'room:joined', serializeRoom(openRoom));
             broadcastRoom(openRoom, 'room:updated', serializeRoom(openRoom), conn.playerId);
           } else {
-            // Create a public room and wait for another player
             handleLeaveRoom(conn);
             let code = generateRoomCode();
             while (rooms.has(code)) code = generateRoomCode();
             const mapId: MapId = MAPS[payload.mapId as MapId] ? payload.mapId : 'hospital';
-            const difficulty: DifficultyId = DIFFICULTIES[payload.difficulty as DifficultyId] ? payload.difficulty : 'normal';
+            const difficulty: DifficultyId = DIFFICULTIES[payload.difficulty as DifficultyId]
+              ? payload.difficulty
+              : 'normal';
             const room: GameRoom = {
               id: code,
               hostId: conn.playerId,
               mapId,
               difficulty,
+              gameMode: 'unlimited',
               isPublicMatchmaking: true,
               status: 'waiting',
               players: new Map([[conn.playerId, buildRoomMember()]]),
+              pausedPlayers: new Map(),
+              pausedSince: null,
+              voteState: null,
               wave: 1,
-              maxWaves: 6,
+              maxWaves: 0,
               waveState: 'intermission',
               intermissionEndsAt: 0,
               monstersToSpawn: [],
@@ -779,14 +1074,13 @@ export function setupGameWebSocket(server: HttpServer) {
             };
             rooms.set(code, room);
             conn.roomId = code;
-            db.prepare('INSERT OR REPLACE INTO rooms (id, host_id, map_id, difficulty, status, max_players) VALUES (?, ?, ?, ?, ?, 2)').run(
+            db.prepare(
+              'INSERT OR REPLACE INTO rooms (id, host_id, map_id, difficulty, status, max_players) VALUES (?, ?, ?, ?, ?, 2)'
+            ).run(code, conn.playerId, mapId, difficulty, 'waiting');
+            db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(
               code,
-              conn.playerId,
-              mapId,
-              difficulty,
-              'waiting'
+              conn.playerId
             );
-            db.prepare('INSERT OR REPLACE INTO room_members (room_id, player_id, is_ready) VALUES (?, ?, 0)').run(code, conn.playerId);
             send(ws, 'room:joined', serializeRoom(room));
           }
           break;
@@ -813,13 +1107,16 @@ export function setupGameWebSocket(server: HttpServer) {
           const p = room.players.get(conn.playerId);
           if (!p) return;
           p.isReady = Boolean(payload.isReady);
-          // Refresh weapon/loadout when readying
           p.weaponId = profile.equippedWeapon;
           p.loadout = profile.equippedLoadout;
           const wLevels: Record<string, number> = {};
           for (const [wid, info] of Object.entries(profile.weapons)) wLevels[wid] = info.upgradeLevel;
           p.weaponLevels = wLevels;
-          db.prepare('UPDATE room_members SET is_ready = ? WHERE room_id = ? AND player_id = ?').run(p.isReady ? 1 : 0, room.id, conn.playerId);
+          db.prepare('UPDATE room_members SET is_ready = ? WHERE room_id = ? AND player_id = ?').run(
+            p.isReady ? 1 : 0,
+            room.id,
+            conn.playerId
+          );
           broadcastRoom(room, 'room:updated', serializeRoom(room));
           break;
         }
@@ -829,8 +1126,17 @@ export function setupGameWebSocket(server: HttpServer) {
           const room = rooms.get(conn.roomId);
           if (!room || room.hostId !== conn.playerId || room.status !== 'waiting') return;
           if (payload.mapId && MAPS[payload.mapId as MapId]) room.mapId = payload.mapId;
-          if (payload.difficulty && DIFFICULTIES[payload.difficulty as DifficultyId]) room.difficulty = payload.difficulty;
-          db.prepare('UPDATE rooms SET map_id = ?, difficulty = ? WHERE id = ?').run(room.mapId, room.difficulty, room.id);
+          if (payload.difficulty && DIFFICULTIES[payload.difficulty as DifficultyId]) {
+            room.difficulty = payload.difficulty;
+          }
+          if (payload.gameMode && GAME_MODES[payload.gameMode as GameModeId]) {
+            room.gameMode = payload.gameMode;
+          }
+          db.prepare('UPDATE rooms SET map_id = ?, difficulty = ? WHERE id = ?').run(
+            room.mapId,
+            room.difficulty,
+            room.id
+          );
           broadcastRoom(room, 'room:updated', serializeRoom(room));
           break;
         }
@@ -854,11 +1160,51 @@ export function setupGameWebSocket(server: HttpServer) {
           break;
         }
 
-        case 'match:start': {
+        case 'room:begin_vote': {
           if (!conn.roomId) return;
           const room = rooms.get(conn.roomId);
           if (!room || room.hostId !== conn.playerId || room.status !== 'waiting') return;
-          // Refresh all players' loadouts & weapon levels
+          beginRoomVote(room);
+          break;
+        }
+
+        case 'room:vote': {
+          if (!conn.roomId) return;
+          const room = rooms.get(conn.roomId);
+          if (!room || room.status !== 'voting' || !room.voteState) return;
+          if (payload.mapId && room.voteState.mapCandidates.includes(payload.mapId)) {
+            room.voteState.mapVotes.set(conn.playerId, payload.mapId);
+          }
+          if (payload.gameMode && room.voteState.modeCandidates.includes(payload.gameMode)) {
+            room.voteState.modeVotes.set(conn.playerId, payload.gameMode);
+          }
+          broadcastRoom(room, 'room:vote_updated', serializeVoteState(room));
+
+          // Auto-deploy once all squad members voted for both map & mode
+          let allVoted = true;
+          for (const pid of room.players.keys()) {
+            if (!room.voteState.mapVotes.has(pid) || !room.voteState.modeVotes.has(pid)) {
+              allVoted = false;
+              break;
+            }
+          }
+          if (allVoted || (payload.forceStart && room.hostId === conn.playerId)) {
+            finalizeRoomVote(room);
+          }
+          break;
+        }
+
+        case 'match:start': {
+          if (!conn.roomId) return;
+          const room = rooms.get(conn.roomId);
+          if (!room || room.hostId !== conn.playerId || (room.status !== 'waiting' && room.status !== 'voting')) {
+            return;
+          }
+          if (payload.mapId && MAPS[payload.mapId as MapId]) room.mapId = payload.mapId;
+          if (payload.gameMode && GAME_MODES[payload.gameMode as GameModeId]) room.gameMode = payload.gameMode;
+          if (room.voteState?.timer) clearTimeout(room.voteState.timer);
+          room.voteState = null;
+
           for (const rp of room.players.values()) {
             const fp = getFullProfileById(rp.playerId);
             if (fp) {
@@ -870,6 +1216,39 @@ export function setupGameWebSocket(server: HttpServer) {
             }
           }
           startMatchLoop(room);
+          break;
+        }
+
+        case 'player:pause': {
+          if (!conn.roomId) return;
+          const room = rooms.get(conn.roomId);
+          if (!room || room.status !== 'playing') return;
+          const p = room.players.get(conn.playerId);
+          if (!p) return;
+
+          const wantPause = Boolean(payload.paused);
+          const wasPaused = room.pausedPlayers.size > 0;
+          if (wantPause) {
+            room.pausedPlayers.set(p.playerId, p.username);
+          } else {
+            room.pausedPlayers.delete(p.playerId);
+          }
+          const isNowPaused = room.pausedPlayers.size > 0;
+
+          if (!wasPaused && isNowPaused) {
+            room.pausedSince = Date.now();
+          } else if (wasPaused && !isNowPaused && room.pausedSince) {
+            const delta = Date.now() - room.pausedSince;
+            room.intermissionEndsAt += delta;
+            room.matchStartedAt += delta;
+            room.lastSpawnAt += delta;
+            for (const c of room.coins.values()) c.createdAt += delta;
+            room.pausedSince = null;
+          }
+
+          broadcastRoom(room, 'match:pause_state', {
+            pausedBy: Array.from(room.pausedPlayers.values()),
+          });
           break;
         }
 
@@ -897,19 +1276,22 @@ export function setupGameWebSocket(server: HttpServer) {
           if (!conn.roomId) return;
           const room = rooms.get(conn.roomId);
           if (!room || room.status !== 'playing') return;
+          if (room.pausedPlayers.size > 0) return; // Frozen while paused
           const p = room.players.get(conn.playerId);
           if (!p || !p.alive) return;
 
-          const weaponId = (payload.weaponId && p.weaponLevels[payload.weaponId] ? payload.weaponId : p.weaponId) as WeaponId;
+          const weaponId = (
+            payload.weaponId && p.weaponLevels[payload.weaponId] ? payload.weaponId : p.weaponId
+          ) as WeaponId;
           const lvl = p.weaponLevels[weaponId] || 1;
           const wStats = getWeaponStatsAtLevel(weaponId, lvl);
+          const modeDef = GAME_MODES[room.gameMode] || GAME_MODES.unlimited;
 
           const now = Date.now();
-          const minIntervalMs = (1000 / wStats.fireRate) * 0.72; // slight network jitter tolerance
+          const minIntervalMs = (1000 / (wStats.fireRate * modeDef.fireRateMult)) * 0.68;
           if (now - p.lastShotAt < minIntervalMs) return;
           p.lastShotAt = now;
 
-          // Broadcast shot FX to teammate
           broadcastRoom(
             room,
             'match:shot_fx',
@@ -926,7 +1308,6 @@ export function setupGameWebSocket(server: HttpServer) {
             p.playerId
           );
 
-          // Server-side ray hit check against active monsters
           const rays: Array<{ dx: number; dy: number; dz: number }> = Array.isArray(payload.rays)
             ? payload.rays.slice(0, wStats.pellets)
             : [{ dx: Number(payload.dx) || 0, dy: Number(payload.dy) || 0, dz: Number(payload.dz) || -1 }];
@@ -968,7 +1349,6 @@ export function setupGameWebSocket(server: HttpServer) {
                 p.xpEarned += bestMonster.xpReward;
                 p.weaponKills[weaponId] = (p.weaponKills[weaponId] || 0) + 1;
 
-                // Drop coin pickup in 3D world
                 const coinId = crypto.randomUUID();
                 room.coins.set(coinId, {
                   id: coinId,

@@ -1,5 +1,6 @@
-export type MapId = 'hospital' | 'forest' | 'mansion' | 'lab' | 'school';
+export type MapId = 'hospital' | 'forest' | 'mansion' | 'lab' | 'school' | 'catacombs' | 'subway';
 export type DifficultyId = 'normal' | 'nightmare' | 'hell';
+export type GameModeId = 'unlimited' | 'boss_rush' | 'blitz' | 'hardcore';
 export type WeaponId =
   | 'pistol'
   | 'smg'
@@ -15,6 +16,9 @@ export type MonsterType =
   | 'crawler'
   | 'brute'
   | 'phantom'
+  | 'spitter'
+  | 'howler'
+  | 'sentinel'
   | 'boss';
 
 export type CustomizationCategory =
@@ -559,6 +563,94 @@ export const MAPS: Record<MapId, MapDef> = {
       { x: 19, z: 4, w: 1.6, h: 2.4, d: 6, kind: 'prop' },
     ],
   },
+  catacombs: {
+    id: 'catacombs',
+    name: 'Sunken Catacombs',
+    subtitle: 'Bone Crypts Beneath St. Jude',
+    difficultyRating: 4,
+    arenaHalfSize: 29,
+    outdoor: false,
+    skyColor: '#050406',
+    fogColor: '#0d0910',
+    fogDensity: 0.036,
+    ambientColor: '#291c2e',
+    lightColor: '#c084fc',
+    floorColor: '#1e1b22',
+    wallColor: '#362f3d',
+    accentLightColor: '#a855f7',
+    description: 'Ancient stone ossuary arches and ritual altars swarming with Crawlers, Howlers, and Titans.',
+    playerSpawns: [
+      [-2.5, 0],
+      [2.5, 0],
+    ],
+    monsterSpawns: [
+      [-23, -23],
+      [23, -23],
+      [-23, 23],
+      [23, 23],
+      [0, -24],
+    ],
+    supplyCaches: [
+      [-14, 0],
+      [14, 0],
+      [0, 16],
+    ],
+    obstacles: [
+      { x: -10, z: -10, w: 2.8, h: 4.5, d: 2.8, kind: 'pillar' },
+      { x: 10, z: -10, w: 2.8, h: 4.5, d: 2.8, kind: 'pillar' },
+      { x: -10, z: 10, w: 2.8, h: 4.5, d: 2.8, kind: 'pillar' },
+      { x: 10, z: 10, w: 2.8, h: 4.5, d: 2.8, kind: 'pillar' },
+      { x: 0, z: -14, w: 8, h: 3.4, d: 1.5, kind: 'wall' },
+      { x: 0, z: 14, w: 8, h: 3.4, d: 1.5, kind: 'wall' },
+      { x: -17, z: 0, w: 1.8, h: 3.2, d: 8, kind: 'wall' },
+      { x: 17, z: 0, w: 1.8, h: 3.2, d: 8, kind: 'wall' },
+      { x: 0, z: -4.5, w: 2.6, h: 1.2, d: 1.6, kind: 'prop' },
+    ],
+  },
+  subway: {
+    id: 'subway',
+    name: 'Derelict Metro',
+    subtitle: 'Sector 9 Underground Line',
+    difficultyRating: 5,
+    arenaHalfSize: 31,
+    outdoor: false,
+    skyColor: '#040608',
+    fogColor: '#090e14',
+    fogDensity: 0.031,
+    ambientColor: '#1e293b',
+    lightColor: '#38bdf8',
+    floorColor: '#1b1f24',
+    wallColor: '#2d3748',
+    accentLightColor: '#f59e0b',
+    description: 'Abandoned train cars, concrete ticket pillars, and echoing tunnels built for relentless endless runs.',
+    playerSpawns: [
+      [0, -2],
+      [0, 2],
+    ],
+    monsterSpawns: [
+      [-26, -24],
+      [26, -24],
+      [-26, 24],
+      [26, 24],
+      [-27, 0],
+      [27, 0],
+    ],
+    supplyCaches: [
+      [0, -16],
+      [0, 16],
+      [-18, 0],
+    ],
+    obstacles: [
+      { x: -13, z: -9, w: 10, h: 3.2, d: 2.8, kind: 'prop' },
+      { x: 13, z: 9, w: 10, h: 3.2, d: 2.8, kind: 'prop' },
+      { x: -13, z: 9, w: 2.2, h: 4.5, d: 2.2, kind: 'pillar' },
+      { x: 13, z: -9, w: 2.2, h: 4.5, d: 2.2, kind: 'pillar' },
+      { x: 0, z: -13, w: 6, h: 3.2, d: 1.4, kind: 'wall' },
+      { x: 0, z: 13, w: 6, h: 3.2, d: 1.4, kind: 'wall' },
+      { x: -5, z: 0, w: 1.8, h: 1.4, d: 3.2, kind: 'table' },
+      { x: 5, z: 0, w: 1.8, h: 1.4, d: 3.2, kind: 'table' },
+    ],
+  },
 };
 
 export interface MonsterDef {
@@ -647,21 +739,164 @@ export const MONSTERS: Record<MonsterType, MonsterDef> = {
     scoreReward: 450,
     xpReward: 85,
   },
+  spitter: {
+    type: 'spitter',
+    name: 'Acid Bile-Spitter',
+    hp: 95,
+    speed: 4.2,
+    damage: 18,
+    attackRange: 6.5,
+    attackCooldown: 1.75,
+    radius: 0.62,
+    height: 1.9,
+    coinReward: 34,
+    scoreReward: 210,
+    xpReward: 40,
+  },
+  howler: {
+    type: 'howler',
+    name: 'Banshee Howler',
+    hp: 120,
+    speed: 6.7,
+    damage: 17,
+    attackRange: 2.0,
+    attackCooldown: 0.95,
+    radius: 0.58,
+    height: 2.15,
+    coinReward: 42,
+    scoreReward: 260,
+    xpReward: 48,
+  },
+  sentinel: {
+    type: 'sentinel',
+    name: 'Obsidian Stalker',
+    hp: 255,
+    speed: 4.9,
+    damage: 26,
+    attackRange: 2.35,
+    attackCooldown: 1.15,
+    radius: 0.82,
+    height: 2.45,
+    coinReward: 65,
+    scoreReward: 390,
+    xpReward: 72,
+  },
   boss: {
     type: 'boss',
     name: 'Abomination Titan',
-    hp: 1250,
-    speed: 3.1,
+    hp: 1350,
+    speed: 3.3,
     damage: 38,
     attackRange: 2.9,
     attackCooldown: 1.5,
     radius: 1.45,
     height: 3.4,
-    coinReward: 220,
-    scoreReward: 1500,
-    xpReward: 260,
+    coinReward: 250,
+    scoreReward: 1600,
+    xpReward: 280,
   },
 };
+
+export interface GameModeDef {
+  id: GameModeId;
+  name: string;
+  tagline: string;
+  description: string;
+  hpMult: number;
+  speedMult: number;
+  rewardMult: number;
+  playerSpeedMult: number;
+  fireRateMult: number;
+  spawnIntervalMs: number;
+  fogMult: number;
+  bossInterval: number;
+}
+
+export const GAME_MODES: Record<GameModeId, GameModeDef> = {
+  unlimited: {
+    id: 'unlimited',
+    name: 'Endless Nightfall',
+    tagline: 'Unlimited Waves · Boss Every 5 Waves',
+    description: 'Survive infinite escalating horror waves. An Abomination Titan descends every 5th wave.',
+    hpMult: 1.0,
+    speedMult: 1.0,
+    rewardMult: 1.0,
+    playerSpeedMult: 1.0,
+    fireRateMult: 1.0,
+    spawnIntervalMs: 700,
+    fogMult: 1.0,
+    bossInterval: 5,
+  },
+  boss_rush: {
+    id: 'boss_rush',
+    name: 'Titan Hunt',
+    tagline: 'Heavy Elites · +50% Coins & Boss Every 5 Waves',
+    description: 'Packed with Sentinels, Brutes, and Titans every 5 waves with +50% coin & XP payouts.',
+    hpMult: 1.15,
+    speedMult: 1.05,
+    rewardMult: 1.5,
+    playerSpeedMult: 1.05,
+    fireRateMult: 1.05,
+    spawnIntervalMs: 650,
+    fogMult: 1.0,
+    bossInterval: 5,
+  },
+  blitz: {
+    id: 'blitz',
+    name: 'Blood Blitz',
+    tagline: '+30% Fire Rate & Speed · Fast Swarm Waves',
+    description: 'High-adrenaline endless arcade chaos: faster movement, faster guns, relentless swarms, boss every 5 waves.',
+    hpMult: 0.9,
+    speedMult: 1.18,
+    rewardMult: 1.25,
+    playerSpeedMult: 1.22,
+    fireRateMult: 1.28,
+    spawnIntervalMs: 460,
+    fogMult: 0.85,
+    bossInterval: 5,
+  },
+  hardcore: {
+    id: 'hardcore',
+    name: 'Blackout Nightmare',
+    tagline: 'Dense Fog · +75% Rewards · Boss Every 5 Waves',
+    description: 'Thick oppressive darkness and lethal monsters for elite operatives seeking maximum coins & XP.',
+    hpMult: 1.35,
+    speedMult: 1.14,
+    rewardMult: 1.75,
+    playerSpeedMult: 1.0,
+    fireRateMult: 1.0,
+    spawnIntervalMs: 620,
+    fogMult: 1.38,
+    bossInterval: 5,
+  },
+};
+
+export function resolveCircleObstacles(
+  x: number,
+  z: number,
+  radius: number,
+  map: MapDef
+): { x: number; z: number; collided: boolean } {
+  const limit = map.arenaHalfSize - radius - 0.5;
+  let nx = Math.max(-limit, Math.min(limit, x));
+  let nz = Math.max(-limit, Math.min(limit, z));
+  let collided = nx !== x || nz !== z;
+
+  for (const obs of map.obstacles) {
+    const hw = obs.w / 2 + radius;
+    const hd = obs.d / 2 + radius;
+    const dx = nx - obs.x;
+    const dz = nz - obs.z;
+    if (Math.abs(dx) < hw && Math.abs(dz) < hd) {
+      collided = true;
+      const penX = hw - Math.abs(dx);
+      const penZ = hd - Math.abs(dz);
+      if (penX < penZ) nx += dx >= 0 ? penX : -penX;
+      else nz += dz >= 0 ? penZ : -penZ;
+    }
+  }
+  return { x: nx, z: nz, collided };
+}
 
 export const DIFFICULTIES: Record<
   DifficultyId,

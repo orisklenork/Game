@@ -11,6 +11,10 @@ export interface ProceduralTextureSet {
   labWall: THREE.CanvasTexture;
   schoolFloor: THREE.CanvasTexture;
   schoolWall: THREE.CanvasTexture;
+  catacombsFloor: THREE.CanvasTexture;
+  catacombsWall: THREE.CanvasTexture;
+  subwayFloor: THREE.CanvasTexture;
+  subwayWall: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
   muzzleFlash: THREE.CanvasTexture;
   particleGlow: THREE.CanvasTexture;
@@ -210,6 +214,66 @@ export function createProceduralTextures(renderer: THREE.WebGLRenderer): Procedu
   const schoolWall = finalizeTexture(swC, aniso, 4, 1);
   all.push(schoolWall);
 
+  // 6. Sunken Catacombs weathered stone slabs & mossy crypt wall
+  const [cfC, cfCtx] = makeCanvas(256, 256);
+  cfCtx.fillStyle = '#18141d';
+  cfCtx.fillRect(0, 0, 256, 256);
+  for (let y = 0; y < 256; y += 64) {
+    for (let x = 0; x < 256; x += 64) {
+      cfCtx.fillStyle = ((x / 64 + y / 64) % 2 === 0) ? '#221d28' : '#1b1721';
+      cfCtx.fillRect(x + 2, y + 2, 60, 60);
+    }
+  }
+  cfCtx.fillStyle = 'rgba(139, 92, 246, 0.14)';
+  cfCtx.beginPath();
+  cfCtx.arc(128, 128, 36, 0, Math.PI * 2);
+  cfCtx.fill();
+  addNoise(cfCtx, 256, 256, 0.12);
+  const catacombsFloor = finalizeTexture(cfC, aniso, 14, 14);
+  all.push(catacombsFloor);
+
+  const [cwC, cwCtx] = makeCanvas(256, 256);
+  cwCtx.fillStyle = '#282230';
+  cwCtx.fillRect(0, 0, 256, 256);
+  cwCtx.strokeStyle = '#130f18';
+  cwCtx.lineWidth = 3;
+  for (let y = 0; y < 256; y += 32) {
+    const offset = (y / 32) % 2 === 0 ? 0 : 32;
+    for (let x = -32; x < 256; x += 64) {
+      cwCtx.strokeRect(x + offset, y, 64, 32);
+    }
+  }
+  addNoise(cwCtx, 256, 256, 0.11);
+  const catacombsWall = finalizeTexture(cwC, aniso, 4, 1);
+  all.push(catacombsWall);
+
+  // 7. Derelict Metro concrete & hazard stripe
+  const [subfC, subfCtx] = makeCanvas(256, 256);
+  subfCtx.fillStyle = '#181c21';
+  subfCtx.fillRect(0, 0, 256, 256);
+  subfCtx.fillStyle = '#20262d';
+  subfCtx.fillRect(0, 0, 256, 12);
+  subfCtx.fillStyle = '#d97706';
+  for (let x = 0; x < 256; x += 32) {
+    subfCtx.fillRect(x, 240, 18, 12);
+  }
+  addNoise(subfCtx, 256, 256, 0.09);
+  const subwayFloor = finalizeTexture(subfC, aniso, 14, 14);
+  all.push(subwayFloor);
+
+  const [subwC, subwCtx] = makeCanvas(256, 256);
+  subwCtx.fillStyle = '#212730';
+  subwCtx.fillRect(0, 0, 256, 256);
+  subwCtx.fillStyle = '#161b22';
+  subwCtx.fillRect(0, 170, 256, 86);
+  subwCtx.fillStyle = '#0284c7';
+  subwCtx.fillRect(0, 118, 256, 8);
+  subwCtx.fillStyle = '#f59e0b';
+  subwCtx.fillRect(0, 128, 256, 3);
+  addNoise(subwCtx, 256, 256, 0.08);
+  const subwayWall = finalizeTexture(subwC, aniso, 4, 1);
+  all.push(subwayWall);
+
   // Contact shadow radial gradient
   const [csC, csCtx] = makeCanvas(128, 128);
   const grad = csCtx.createRadialGradient(64, 64, 4, 64, 64, 62);
@@ -255,6 +319,10 @@ export function createProceduralTextures(renderer: THREE.WebGLRenderer): Procedu
     labWall,
     schoolFloor,
     schoolWall,
+    catacombsFloor,
+    catacombsWall,
+    subwayFloor,
+    subwayWall,
     contactShadow,
     muzzleFlash,
     particleGlow,

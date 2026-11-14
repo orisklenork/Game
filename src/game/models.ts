@@ -460,6 +460,9 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
   const isCrawler = type === 'crawler';
   const isPhantom = type === 'phantom';
   const isRunner = type === 'runner';
+  const isSpitter = type === 'spitter';
+  const isHowler = type === 'howler';
+  const isSentinel = type === 'sentinel';
 
   const skinColor = isBoss
     ? '#2b0d11'
@@ -467,6 +470,12 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
     ? '#2f2b29'
     : isPhantom
     ? '#1e1b4b'
+    : isSpitter
+    ? '#1a3a22'
+    : isHowler
+    ? '#3b2442'
+    : isSentinel
+    ? '#14171f'
     : isRunner
     ? '#4a1d1f'
     : isCrawler
@@ -475,25 +484,47 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
 
   const fleshMat = new THREE.MeshStandardMaterial({
     color: skinColor,
-    roughness: isPhantom ? 0.35 : 0.78,
-    metalness: isBoss || isBrute ? 0.3 : 0.05,
+    roughness: isPhantom ? 0.35 : isSentinel ? 0.35 : 0.76,
+    metalness: isBoss || isBrute || isSentinel ? 0.38 : 0.06,
     transparent: isPhantom,
     opacity: isPhantom ? 0.84 : 1,
-    emissive: isPhantom ? new THREE.Color('#312e81') : isBoss ? new THREE.Color('#450a0a') : new THREE.Color(0x000000),
-    emissiveIntensity: isPhantom ? 0.7 : isBoss ? 0.45 : 0,
+    emissive: isPhantom
+      ? new THREE.Color('#312e81')
+      : isBoss
+      ? new THREE.Color('#450a0a')
+      : isSpitter
+      ? new THREE.Color('#14532d')
+      : isHowler
+      ? new THREE.Color('#581c87')
+      : isSentinel
+      ? new THREE.Color('#78350f')
+      : new THREE.Color(0x000000),
+    emissiveIntensity: isPhantom ? 0.7 : isBoss ? 0.5 : isSpitter || isHowler || isSentinel ? 0.35 : 0,
   });
 
   const boneMat = new THREE.MeshStandardMaterial({
-    color: isBoss ? '#991b1b' : '#a8a29e',
-    roughness: 0.45,
-    metalness: 0.25,
+    color: isBoss ? '#991b1b' : isSpitter ? '#4ade80' : isHowler ? '#e879f9' : isSentinel ? '#f59e0b' : '#a8a29e',
+    roughness: 0.4,
+    metalness: 0.3,
+    emissive: isSpitter ? new THREE.Color('#22c55e') : isHowler ? new THREE.Color('#c026d3') : isSentinel ? new THREE.Color('#d97706') : new THREE.Color(0x000000),
+    emissiveIntensity: isSpitter || isHowler || isSentinel ? 0.65 : 0,
   });
 
   const eyeMat = new THREE.MeshBasicMaterial({
-    color: isPhantom ? 0x60a5fa : isBoss ? 0xff1e1e : 0xef4444,
+    color: isPhantom
+      ? 0x60a5fa
+      : isSpitter
+      ? 0x4ade80
+      : isHowler
+      ? 0xe879f9
+      : isSentinel
+      ? 0xfbbf24
+      : isBoss
+      ? 0xff1e1e
+      : 0xef4444,
   });
 
-  const shadowScale = isBoss ? 2.8 : isBrute ? 2.0 : 1.3;
+  const shadowScale = isBoss ? 2.8 : isBrute || isSentinel ? 2.0 : 1.3;
   const shadowPlane = new THREE.Mesh(
     new THREE.PlaneGeometry(shadowScale, shadowScale),
     new THREE.MeshBasicMaterial({ map: contactShadowTex, transparent: true, opacity: 0.65, depthWrite: false })
@@ -502,7 +533,7 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
   shadowPlane.position.y = 0.02;
   group.add(shadowPlane);
 
-  const scale = isBoss ? 1.75 : isBrute ? 1.3 : isRunner ? 0.94 : 1.0;
+  const scale = isBoss ? 1.75 : isBrute ? 1.3 : isSentinel ? 1.18 : isHowler ? 1.05 : isRunner ? 0.94 : 1.0;
 
   const leftLeg = new THREE.Group();
   const rightLeg = new THREE.Group();
@@ -554,7 +585,7 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
 
     const torso = new THREE.Mesh(new THREE.BoxGeometry(0.56 * scale, 0.72 * scale, 0.32 * scale), fleshMat);
     torso.position.set(0, legH + 0.36 * scale, 0);
-    torso.rotation.x = isRunner ? 0.24 : 0.08;
+    torso.rotation.x = isRunner || isSpitter ? 0.24 : 0.08;
 
     const ribs = new THREE.Mesh(new THREE.BoxGeometry(0.46 * scale, 0.36 * scale, 0.34 * scale), boneMat);
     ribs.position.set(0, legH + 0.4 * scale, 0.02 * scale);
@@ -562,7 +593,7 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.34 * scale, 0.36 * scale, 0.34 * scale), fleshMat);
     head.position.set(0, legH + 0.92 * scale, 0.08 * scale);
 
-    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.045 * scale, 8, 8), eyeMat);
+    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.048 * scale, 8, 8), eyeMat);
     eyeL.position.set(-0.08 * scale, legH + 0.95 * scale, 0.25 * scale);
     const eyeR = eyeL.clone();
     eyeR.position.x = 0.08 * scale;
@@ -572,9 +603,12 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
     const lArmMesh = new THREE.Mesh(new THREE.BoxGeometry(0.16 * scale, 0.65 * scale, 0.16 * scale), fleshMat);
     lArmMesh.position.set(0, -0.22 * scale, 0.24 * scale);
     lArmMesh.rotation.x = -Math.PI / 2.6;
-    const lClaw = new THREE.Mesh(new THREE.ConeGeometry(0.06 * scale, 0.24 * scale, 5), boneMat);
+    const lClaw = new THREE.Mesh(
+      new THREE.ConeGeometry(isSentinel ? 0.07 * scale : 0.06 * scale, isSentinel ? 0.44 * scale : 0.24 * scale, 5),
+      boneMat
+    );
     lClaw.rotation.x = Math.PI / 2;
-    lClaw.position.set(0, -0.32 * scale, 0.56 * scale);
+    lClaw.position.set(0, -0.32 * scale, isSentinel ? 0.64 * scale : 0.56 * scale);
     leftArm.add(lArmMesh, lClaw);
 
     rightArm.position.set(0.38 * scale, legH + 0.62 * scale, 0.05 * scale);
@@ -582,21 +616,42 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
     const rClaw = lClaw.clone();
     rightArm.add(rArmMesh, rClaw);
 
-    if (isBoss) {
-      const hornL = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.65, 6), boneMat);
-      hornL.position.set(-0.32, legH + 1.25 * scale, 0.05);
+    if (isSpitter) {
+      const sacL = new THREE.Mesh(new THREE.SphereGeometry(0.19, 10, 10), boneMat);
+      sacL.position.set(-0.26, legH + 0.66, -0.14);
+      const sacR = sacL.clone();
+      sacR.position.x = 0.26;
+      bodyParts.push(sacL, sacR);
+      group.add(sacL, sacR);
+    }
+
+    if (isHowler) {
+      const crest = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.48, 5), boneMat);
+      crest.position.set(0, legH + 1.24, 0.04);
+      bodyParts.push(crest);
+      group.add(crest);
+    }
+
+    if (isSentinel || isBoss) {
+      const hornL = new THREE.Mesh(new THREE.ConeGeometry(0.1 * scale, 0.42 * scale, 6), boneMat);
+      hornL.position.set(-0.2 * scale, legH + 1.2 * scale, 0.05);
       hornL.rotation.z = 0.35;
       const hornR = hornL.clone();
-      hornR.position.x = 0.32;
+      hornR.position.x = 0.2 * scale;
       hornR.rotation.z = -0.35;
+      bodyParts.push(hornL, hornR);
+      group.add(hornL, hornR);
+    }
+
+    if (isBoss) {
       const shoulderSpikeL = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.55, 6), boneMat);
       shoulderSpikeL.position.set(-0.55, legH + 0.85 * scale, 0);
       shoulderSpikeL.rotation.z = 0.6;
       const shoulderSpikeR = shoulderSpikeL.clone();
       shoulderSpikeR.position.x = 0.55;
       shoulderSpikeR.rotation.z = -0.6;
-      bodyParts.push(hornL, hornR, shoulderSpikeL, shoulderSpikeR);
-      group.add(hornL, hornR, shoulderSpikeL, shoulderSpikeR);
+      bodyParts.push(shoulderSpikeL, shoulderSpikeR);
+      group.add(shoulderSpikeL, shoulderSpikeR);
     }
 
     bodyParts.push(legMeshL, legMeshR, torso, ribs, head, lArmMesh, rArmMesh);
@@ -605,7 +660,7 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
 
   // World-space Health Bar above monster
   const hpBarGroup = new THREE.Group();
-  const barY = isCrawler ? 1.15 : isBoss ? 3.85 : isBrute ? 2.85 : 2.25;
+  const barY = isCrawler ? 1.15 : isBoss ? 3.85 : isBrute || isSentinel ? 2.85 : 2.25;
   hpBarGroup.position.set(0, barY, 0);
 
   const barW = isBoss ? 2.0 : 1.05;
@@ -629,4 +684,25 @@ export function buildMonsterModel(type: MonsterType, contactShadowTex: THREE.Tex
   });
 
   return { group, bodyParts, leftArm, rightArm, leftLeg, rightLeg, hpBarFill, hpBarGroup };
+}
+
+export function buildMedkitModel(): THREE.Group {
+  const g = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.3, metalness: 0.55 });
+  const greenMat = new THREE.MeshStandardMaterial({
+    color: '#10b981',
+    emissive: '#059669',
+    emissiveIntensity: 1.4,
+    roughness: 0.2,
+  });
+  const redMat = new THREE.MeshStandardMaterial({ color: '#dc2626', roughness: 0.45 });
+
+  const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.24, 10), bodyMat);
+  const core = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.13, 10), greenMat);
+  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.04, 0.05), redMat);
+  cap.position.y = 0.13;
+  const needle = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.08, 6), bodyMat);
+  needle.position.y = -0.15;
+  g.add(tube, core, cap, needle);
+  return g;
 }

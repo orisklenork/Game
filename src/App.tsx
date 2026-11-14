@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Award,
   Backpack,
   Coins,
   Crosshair,
@@ -8,7 +7,6 @@ import {
   Search,
   Settings,
   ShoppingBag,
-  Skull,
   Sparkles,
   Trophy,
   User,
@@ -24,11 +22,22 @@ import { LobbyModal } from './components/LobbyModal';
 import { GameSettings, SettingsModal } from './components/SettingsModal';
 import { ShopAndCustomize } from './components/ShopAndCustomize';
 import { SocialAndProfile } from './components/SocialAndProfile';
+import { VoteModal, VoteSessionState } from './components/VoteModal';
 import { audioEngine } from './game/audio';
 import { HorrorGameEngine, HudSnapshot, ServerStatePacket } from './game/GameEngine';
 import { LocalSoloRunner } from './game/LocalSoloRunner';
 import { apiFetch, getSavedToken, isStaticMode, PlayerProfile, RoomState } from './lib/api';
-import { DifficultyId, MapId, MAPS, WeaponId } from './shared/gameData';
+import {
+  createLocalRoom,
+  findOrCreateLocalPublicRoom,
+  joinLocalRoom,
+  leaveLocalRoom,
+  listLocalOpenRooms,
+  subscribeLocalCoop,
+  toggleLocalReady,
+  updateLocalRoomConfig,
+} from './lib/localCoopBroker';
+import { DifficultyId, GAME_MODES, GameModeId, MapId, MAPS, WeaponId } from './shared/gameData';
 
 type ActiveModal =
   | null
@@ -72,12 +81,15 @@ const DEFAULT_HUD: HudSnapshot = {
   coinsEarned: 0,
   healthPurchasesUsed: 0,
   wave: 1,
-  maxWaves: 6,
+  maxWaves: 0,
   waveState: 'intermission',
   elapsedSec: 0,
   monstersRemaining: 0,
   flashlightOn: true,
   pointerLocked: false,
+  gameMode: 'unlimited',
+  pausedBy: [],
+  boss: null,
   teammate: null,
   minimap: {
     arenaHalfSize: 28,
@@ -98,6 +110,20 @@ const AVATAR_COLORS: Record<string, string> = {
   ash: '#475569',
 };
 
+function pickLocalVoteCandidates(preferredMap: MapId): {
+  mapCandidates: MapId[];
+  modeCandidates: GameModeId[];
+} {
+  const allMaps = Object.keys(MAPS) as MapId[];
+  const others = allMaps.filter((m) => m !== preferredMap).sort(() => Math.random() - 0.5);
+  const mapCandidates = [preferredMap, ...others.slice(0, 2)].sort(() => Math.random() - 0.5);
+
+  const allModes = (Object.keys(GAME_MODES) as GameModeId[]).sort(() => Math.random() - 0.5);
+  const modeCandidates = allModes.slice(0, 3);
+  if (!modeCandidates.includes('unlimited')) modeCandidates[0] = 'unlimited';
+  return { mapCandidates, modeCandidates };
+}
+
 export default function App() {
   const canvasMountRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<HorrorGameEngine | null>(null);
@@ -105,6 +131,7 @@ export default function App() {
   const wsFailedRef = useRef(false);
   const localRunnerRef = useRef<LocalSoloRunner | null>(null);
   const pendingWsQueueRef = useRef<Array<{ type: string; payload: any }>>([]);
+  const pausedRef = useRef(false);
 
   const [booting, setBooting] = useState(true);
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
@@ -116,6 +143,8 @@ export default function App() {
   const [previewMap, setPreviewMap] = useState<MapId>('hospital');
 
   const [room, setRoom] = useState<RoomState | null>(null);
+  const [localRoomMode, setLocalRoomMode] = useState(false);
+  const [voteState, setVoteState] = useState<(VoteSessionState & { isLocalOnly?: boolean }) | null>(null);
   const [openRooms, setOpenRooms] = useState<RoomState[]>([]);
   const [joinCode, setJoinCode] = useState('');
   const [friendsList, setFriendsList] = useState<any[]>([]);
@@ -129,6 +158,7 @@ export default function App() {
   const [hitMarker, setHitMarker] = useState<{ active: boolean; killed: boolean }>({ active: false, killed: false });
   const [waveBanner, setWaveBanner] = useState<string | null>(null);
   const [damageFlash, setDamageFlash] = useState(false);
+  const [healPulse, setHealPulse] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [matchResult, setMatchResult] = useState<MatchResultData | null>(null);
 
@@ -164,6 +194,7 @@ export default function App() {
       if (type === 'player:state') runner.updatePlayerState(payload);
       else if (type === 'player:shoot') runner.handleShoot(payload);
       else if (type === 'player:buy_health') runner.buyHealth();
+      else if (type === 'player:pause') runner.setPaused(Boolean(payload.paused));
       else if (type === 'match:abort') {
         runner.abort();
         localRunnerRef.current = null;
@@ -178,6 +209,16 @@ export default function App() {
     }
   }, []);
 
+  const setMatchPaused = useCallback(
+    (next: boolean) => {
+      pausedRef.current = next;
+      setPaused(next);
+      engineRef.current?.setPaused(next);
+      sendWs('player:pause', { paused: next });
+    },
+    [sendWs]
+  );
+
   // Initialize isolated 3D Engine once
   useEffect(() => {
     const mount = canvasMountRef.current;
@@ -188,11 +229,7 @@ export default function App() {
       onShoot: (payload) => sendWs('player:shoot', payload),
       onPlayerStateSend: (payload) => sendWs('player:state', payload),
       onPauseRequest: () => {
-        setPaused((prev) => {
-          const next = !prev;
-          engine.setPaused(next);
-          return next;
-        });
+        setMatchPaused(!pausedRef.current);
       },
       onBuyHealthRequest: () => sendWs('player:buy_health', {}),
       onHitMarker: (killed) => {
@@ -206,7 +243,7 @@ export default function App() {
       engine.dispose();
       engineRef.current = null;
     };
-  }, [sendWs]);
+  }, [sendWs, setMatchPaused]);
 
   // Apply settings changes to Engine & Audio
   useEffect(() => {
@@ -233,6 +270,13 @@ export default function App() {
         setProfile(null);
       })
       .finally(() => setBooting(false));
+  }, []);
+
+  // Cross-tab BroadcastChannel listener for static co-op rooms
+  useEffect(() => {
+    return subscribeLocalCoop((updatedRoom) => {
+      setRoom((curr) => (curr && curr.id === updatedRoom.id ? updatedRoom : curr));
+    });
   }, []);
 
   const refreshFriends = useCallback(async () => {
@@ -282,6 +326,7 @@ export default function App() {
         switch (type) {
           case 'room:joined':
           case 'room:updated':
+            setLocalRoomMode(false);
             setRoom(payload);
             setActiveModal(null);
             setPreviewMap(payload.mapId);
@@ -291,6 +336,7 @@ export default function App() {
 
           case 'room:left':
             setRoom(null);
+            setVoteState(null);
             break;
 
           case 'room:open_list':
@@ -309,14 +355,21 @@ export default function App() {
             showToast(`Invite sent to ${payload.toUsername}`);
             break;
 
+          case 'room:vote_started':
+          case 'room:vote_updated':
+            setVoteState({ ...payload, isLocalOnly: false });
+            break;
+
           case 'match:started':
             audioEngine.unlock();
             audioEngine.startAmbientMusic();
+            setVoteState(null);
             setMatchResult(null);
+            pausedRef.current = false;
             setPaused(false);
             setActiveModal(null);
             setScreen('playing');
-            setWaveBanner('WAVE 1 STARTING');
+            setWaveBanner(`WAVE 1 · ${GAME_MODES[(payload.gameMode as GameModeId) || 'unlimited']?.name.toUpperCase()}`);
             window.setTimeout(() => setWaveBanner(null), 2400);
 
             setProfile((curr) => {
@@ -325,6 +378,7 @@ export default function App() {
               engineRef.current?.startMatch({
                 localPlayerId: curr.id,
                 mapId: payload.mapId,
+                gameMode: payload.gameMode || 'unlimited',
                 equippedWeapon: curr.equippedWeapon,
                 ownedWeapons: curr.weapons,
                 weaponSkinId: skinId,
@@ -334,12 +388,16 @@ export default function App() {
             });
             break;
 
+          case 'match:pause_state':
+            setHud((curr) => ({ ...curr, pausedBy: payload.pausedBy || [] }));
+            break;
+
           case 'match:state':
             engineRef.current?.applyServerState(payload as ServerStatePacket);
             break;
 
           case 'match:wave':
-            setWaveBanner(payload.isBossWave ? `BOSS WAVE ${payload.wave}` : `WAVE ${payload.wave}`);
+            setWaveBanner(payload.isBossWave ? `BOSS WAVE ${payload.wave} · TITAN` : `WAVE ${payload.wave}`);
             window.setTimeout(() => setWaveBanner(null), 2600);
             break;
 
@@ -378,6 +436,9 @@ export default function App() {
 
           case 'match:health_purchased':
             audioEngine.playHeal();
+            engineRef.current?.playMedkitAnimation();
+            setHealPulse(true);
+            window.setTimeout(() => setHealPulse(false), 1100);
             setProfile((curr) => (curr ? { ...curr, coins: payload.newCoinBalance } : curr));
             showToast(`Medkit applied (${payload.remainingPurchases} left)`);
             break;
@@ -389,6 +450,7 @@ export default function App() {
           case 'match:ended':
             audioEngine.setBossMusic(false);
             setScreen('menu');
+            pausedRef.current = false;
             setPaused(false);
             engineRef.current?.setDioramaMode();
             if (payload.profile) setProfile(payload.profile);
@@ -418,105 +480,166 @@ export default function App() {
     };
   }, [token, profile?.id, refreshFriends, showToast]);
 
-  const startLocalSoloMatch = () => {
-    if (!profile) return;
-    if (localRunnerRef.current) {
-      localRunnerRef.current.abort();
-      localRunnerRef.current = null;
-    }
-    const runner = new LocalSoloRunner(profile, previewMap, {
-      onStarted: (payload) => {
-        audioEngine.unlock();
-        audioEngine.startAmbientMusic();
-        setMatchResult(null);
-        setPaused(false);
-        setActiveModal(null);
-        setScreen('playing');
-        setWaveBanner('WAVE 1 STARTING');
-        window.setTimeout(() => setWaveBanner(null), 2400);
-        const skinId = profile.equippedLoadout.weapon_skin || 'wskin_factory';
-        engineRef.current?.startMatch({
-          localPlayerId: profile.id,
-          mapId: payload.mapId,
-          equippedWeapon: profile.equippedWeapon,
-          ownedWeapons: profile.weapons,
-          weaponSkinId: skinId,
-          players: payload.players,
-        });
-      },
-      onState: (pkt) => engineRef.current?.applyServerState(pkt),
-      onWave: (p) => {
-        setWaveBanner(p.isBossWave ? `BOSS WAVE ${p.wave}` : `WAVE ${p.wave}`);
-        window.setTimeout(() => setWaveBanner(null), 2600);
-      },
-      onWaveCleared: (p) => {
-        setWaveBanner(`WAVE CLEARED · NEXT WAVE ${p.nextWave}`);
-        window.setTimeout(() => setWaveBanner(null), 2500);
-      },
-      onHitConfirm: (p) => engineRef.current?.handleHitConfirm(p.hits),
-      onPlayerHit: () => {
-        engineRef.current?.handlePlayerDamageFx();
-        setDamageFlash(true);
-        window.setTimeout(() => setDamageFlash(false), 200);
-      },
-      onCoinCollected: () => audioEngine.playCoinPickup(),
-      onHealthPurchased: (p) => {
-        audioEngine.playHeal();
-        setProfile((curr) => (curr ? { ...curr, coins: p.newCoinBalance } : curr));
-        showToast(`Medkit applied (${p.remainingPurchases} left)`);
-      },
-      onHealthError: (p) => showToast(p.message),
-      onEnded: (p) => {
+  const startLocalSoloMatch = useCallback(
+    (chosenMap: MapId = previewMap, chosenMode: GameModeId = 'unlimited') => {
+      if (!profile) return;
+      if (localRunnerRef.current) {
+        localRunnerRef.current.abort();
         localRunnerRef.current = null;
-        audioEngine.setBossMusic(false);
-        setScreen('menu');
-        setPaused(false);
-        engineRef.current?.setDioramaMode();
-        if (p.profile) setProfile(p.profile);
-        setMatchResult({
-          victory: p.victory,
-          wavesCleared: p.wavesCleared,
-          durationSeconds: p.durationSeconds,
-          results: p.results,
-        });
-      },
+      }
+      setPreviewMap(chosenMap);
+      const runner = new LocalSoloRunner(
+        profile,
+        chosenMap,
+        {
+          onStarted: (payload) => {
+            audioEngine.unlock();
+            audioEngine.startAmbientMusic();
+            setVoteState(null);
+            setMatchResult(null);
+            pausedRef.current = false;
+            setPaused(false);
+            setActiveModal(null);
+            setScreen('playing');
+            setWaveBanner(`WAVE 1 · ${GAME_MODES[payload.gameMode]?.name.toUpperCase()}`);
+            window.setTimeout(() => setWaveBanner(null), 2400);
+            const skinId = profile.equippedLoadout.weapon_skin || 'wskin_factory';
+            engineRef.current?.startMatch({
+              localPlayerId: profile.id,
+              mapId: payload.mapId,
+              gameMode: payload.gameMode,
+              equippedWeapon: profile.equippedWeapon,
+              ownedWeapons: profile.weapons,
+              weaponSkinId: skinId,
+              players: payload.players,
+            });
+          },
+          onState: (pkt) => engineRef.current?.applyServerState(pkt),
+          onWave: (p) => {
+            setWaveBanner(p.isBossWave ? `BOSS WAVE ${p.wave} · TITAN` : `WAVE ${p.wave}`);
+            window.setTimeout(() => setWaveBanner(null), 2600);
+          },
+          onWaveCleared: (p) => {
+            setWaveBanner(`WAVE CLEARED · NEXT WAVE ${p.nextWave}`);
+            window.setTimeout(() => setWaveBanner(null), 2500);
+          },
+          onHitConfirm: (p) => engineRef.current?.handleHitConfirm(p.hits),
+          onPlayerHit: () => {
+            engineRef.current?.handlePlayerDamageFx();
+            setDamageFlash(true);
+            window.setTimeout(() => setDamageFlash(false), 200);
+          },
+          onCoinCollected: () => audioEngine.playCoinPickup(),
+          onHealthPurchased: (p) => {
+            audioEngine.playHeal();
+            engineRef.current?.playMedkitAnimation();
+            setHealPulse(true);
+            window.setTimeout(() => setHealPulse(false), 1100);
+            setProfile((curr) => (curr ? { ...curr, coins: p.newCoinBalance } : curr));
+            showToast(`Medkit applied (${p.remainingPurchases} left)`);
+          },
+          onHealthError: (p) => showToast(p.message),
+          onEnded: (p) => {
+            localRunnerRef.current = null;
+            audioEngine.setBossMusic(false);
+            setScreen('menu');
+            pausedRef.current = false;
+            setPaused(false);
+            engineRef.current?.setDioramaMode();
+            if (p.profile) setProfile(p.profile);
+            setMatchResult({
+              victory: p.victory,
+              wavesCleared: p.wavesCleared,
+              durationSeconds: p.durationSeconds,
+              results: p.results,
+            });
+          },
+        },
+        chosenMode
+      );
+      localRunnerRef.current = runner;
+      runner.start();
+    },
+    [previewMap, profile, showToast]
+  );
+
+  const deployLocalVote = useCallback(
+    (v: VoteSessionState & { isLocalOnly?: boolean }) => {
+      if (!profile) return;
+      const chosenMap = v.mapVotes[profile.id] || v.mapCandidates[0] || previewMap;
+      const chosenMode = v.modeVotes[profile.id] || v.modeCandidates[0] || 'unlimited';
+      setVoteState(null);
+
+      if (!isStaticMode() && !wsFailedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        sendWs('room:create', { mapId: chosenMap, gameMode: chosenMode, difficulty: 'normal', isPublic: false });
+        window.setTimeout(() => {
+          sendWs('match:start', { mapId: chosenMap, gameMode: chosenMode });
+        }, 160);
+      } else {
+        setRoom(null);
+        setLocalRoomMode(false);
+        startLocalSoloMatch(chosenMap, chosenMode);
+      }
+    },
+    [previewMap, profile, sendWs, startLocalSoloMatch]
+  );
+
+  // Auto-deploy local solo vote when countdown hits 0
+  useEffect(() => {
+    if (!voteState?.isLocalOnly) return;
+    const msLeft = Math.max(0, voteState.endsAt - Date.now());
+    const t = window.setTimeout(() => {
+      deployLocalVote(voteState);
+    }, msLeft);
+    return () => clearTimeout(t);
+  }, [voteState, deployLocalVote]);
+
+  const openLocalVotePopup = (initialMap: MapId) => {
+    if (!profile) return;
+    const { mapCandidates, modeCandidates } = pickLocalVoteCandidates(initialMap);
+    setVoteState({
+      isLocalOnly: true,
+      endsAt: Date.now() + 14000,
+      mapCandidates,
+      modeCandidates,
+      mapVotes: { [profile.id]: mapCandidates[0] },
+      modeVotes: { [profile.id]: modeCandidates[0] },
+      voters: [{ playerId: profile.id, username: profile.username }],
     });
-    localRunnerRef.current = runner;
-    runner.start();
   };
 
   const handlePlaySoloNow = () => {
     audioEngine.unlock();
     audioEngine.startAmbientMusic();
     audioEngine.playUiClick();
-    if (isStaticMode() || wsFailedRef.current) {
-      startLocalSoloMatch();
-      return;
-    }
-    // Create a room and immediately start match if solo
-    sendWs('room:create', { mapId: previewMap, difficulty: 'normal', isPublic: false });
-    window.setTimeout(() => {
-      sendWs('match:start', {});
-    }, 180);
+    openLocalVotePopup(previewMap);
   };
 
+  const useLocalCoop = () => isStaticMode() || wsFailedRef.current;
+
   const handleCreateRoom = () => {
+    if (!profile) return;
     audioEngine.unlock();
     audioEngine.startAmbientMusic();
     audioEngine.playUiClick();
-    if (isStaticMode() || wsFailedRef.current) {
-      showToast('Co-Op rooms require the live server. Use Play Now for Solo Survival.');
+    if (useLocalCoop()) {
+      const r = createLocalRoom(profile, previewMap, 'normal', false);
+      setLocalRoomMode(true);
+      setRoom(r);
       return;
     }
     sendWs('room:create', { mapId: previewMap, difficulty: 'normal', isPublic: false });
   };
 
   const handleFindPlayer = () => {
+    if (!profile) return;
     audioEngine.unlock();
     audioEngine.startAmbientMusic();
     audioEngine.playUiClick();
-    if (isStaticMode() || wsFailedRef.current) {
-      showToast('Matchmaking requires the live server. Use Play Now for Solo Survival.');
+    if (useLocalCoop()) {
+      const r = findOrCreateLocalPublicRoom(profile, previewMap, 'normal');
+      setLocalRoomMode(true);
+      setRoom(r);
       return;
     }
     sendWs('room:find_player', { mapId: previewMap, difficulty: 'normal' });
@@ -525,8 +648,9 @@ export default function App() {
   const handleOpenJoinModal = () => {
     audioEngine.unlock();
     audioEngine.playUiClick();
-    if (isStaticMode() || wsFailedRef.current) {
-      showToast('Joining Co-Op rooms requires the live server. Use Play Now for Solo Survival.');
+    if (useLocalCoop()) {
+      setOpenRooms(listLocalOpenRooms());
+      setActiveModal('join_room');
       return;
     }
     sendWs('room:list_open', {});
@@ -534,16 +658,32 @@ export default function App() {
   };
 
   const handleJoinByCode = (code: string) => {
+    if (!profile) return;
     audioEngine.playUiClick();
     const clean = code.trim().toUpperCase();
     if (!clean) return;
+    if (useLocalCoop()) {
+      try {
+        const joined = joinLocalRoom(profile, clean);
+        setLocalRoomMode(true);
+        setRoom(joined);
+        setActiveModal(null);
+        setPreviewMap(joined.mapId);
+        engineRef.current?.loadMap(joined.mapId);
+      } catch (err: any) {
+        showToast(err.message || 'Unable to join room');
+      }
+      return;
+    }
     sendWs('room:join', { roomId: clean });
   };
 
   const handleLeaveMatch = () => {
     audioEngine.playUiClick();
     sendWs('match:abort', {});
+    pausedRef.current = false;
     setPaused(false);
+    setVoteState(null);
     setScreen('menu');
     engineRef.current?.setDioramaMode(previewMap);
   };
@@ -577,7 +717,7 @@ export default function App() {
 
       {/* MAIN MENU OVERLAY */}
       {profile && screen === 'menu' && (
-        <div className="fixed inset-0 z-20 flex flex-col justify-between p-5 sm:p-8 overflow-y-auto">
+        <div className="fixed inset-0 z-20 flex flex-col justify-between p-4 sm:p-8 overflow-y-auto">
           {/* Top Bar: Profile Summary + Mute/Settings */}
           <header className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3.5">
@@ -602,7 +742,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 sm:gap-4">
               <div className="flex items-center gap-1.5 font-mono-num font-bold text-base text-amber-400">
                 <Coins className="w-4 h-4" />
                 <span>{profile.coins.toLocaleString()}</span>
@@ -630,7 +770,7 @@ export default function App() {
           </header>
 
           {/* Center Hero + Main Menu Navigation */}
-          <main className="my-auto py-6 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center max-w-6xl w-full mx-auto">
+          <main className="my-auto py-5 grid grid-cols-1 lg:grid-cols-12 gap-7 items-center max-w-6xl w-full mx-auto">
             {/* Left Column: Title Lockup & Menu Actions */}
             <div className="lg:col-span-7 space-y-6">
               <div>
@@ -645,7 +785,7 @@ export default function App() {
                   </h1>
                 </div>
                 <p className="text-sm sm:text-base text-slate-300 max-w-xl leading-relaxed">
-                  Two-player cooperative survival horror. Enter haunted zones, fight escalating monster waves, earn coins, and outlast the Abomination Titan.
+                  Two-player cooperative survival horror. Vote on haunted zones &amp; endless survival modes, fight Spitters, Howlers, and Obsidian Stalkers, and defeat the Abomination Titan every 5 waves.
                 </p>
               </div>
 
@@ -653,7 +793,7 @@ export default function App() {
               <div className="flex flex-wrap gap-3">
                 <button
                   onClick={handlePlaySoloNow}
-                  className="flex items-center gap-2.5 px-7 py-3.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-display font-bold text-base transition-colors cursor-pointer whitespace-nowrap"
+                  className="flex items-center gap-2.5 px-7 py-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-display font-bold text-base transition-colors cursor-pointer whitespace-nowrap shadow-[0_0_24px_rgba(220,38,38,0.3)]"
                 >
                   <Crosshair className="w-5 h-5" />
                   <span>Play Now</span>
@@ -661,7 +801,7 @@ export default function App() {
 
                 <button
                   onClick={handleCreateRoom}
-                  className="flex items-center gap-2 px-5 py-3.5 rounded-lg bg-[#131924] border border-slate-700/60 hover:border-red-500 text-slate-100 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
+                  className="flex items-center gap-2 px-5 py-3.5 rounded-xl bg-[#131924] border border-slate-700/60 hover:border-red-500 text-slate-100 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <PlusSquare className="w-4 h-4 text-red-400" />
                   <span>Create Room</span>
@@ -669,7 +809,7 @@ export default function App() {
 
                 <button
                   onClick={handleOpenJoinModal}
-                  className="flex items-center gap-2 px-5 py-3.5 rounded-lg bg-[#131924] border border-slate-700/60 hover:border-slate-400 text-slate-100 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
+                  className="flex items-center gap-2 px-5 py-3.5 rounded-xl bg-[#131924] border border-slate-700/60 hover:border-slate-400 text-slate-100 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <Users className="w-4 h-4 text-sky-400" />
                   <span>Join Room</span>
@@ -677,7 +817,7 @@ export default function App() {
 
                 <button
                   onClick={handleFindPlayer}
-                  className="flex items-center gap-2 px-5 py-3.5 rounded-lg bg-[#131924] border border-slate-700/60 hover:border-amber-500 text-slate-100 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
+                  className="flex items-center gap-2 px-5 py-3.5 rounded-xl bg-[#131924] border border-slate-700/60 hover:border-amber-500 text-slate-100 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
                 >
                   <Search className="w-4 h-4 text-amber-400" />
                   <span>Find Player</span>
@@ -702,7 +842,7 @@ export default function App() {
                       audioEngine.playUiClick();
                       setActiveModal(id);
                     }}
-                    className="flex items-center gap-2.5 px-4 py-3 rounded-lg bg-[#0d1118]/90 border border-slate-800 hover:border-slate-600 text-left text-sm font-medium text-slate-200 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                    className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-[#0d1118]/90 border border-slate-800 hover:border-slate-600 text-left text-sm font-medium text-slate-200 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     <Icon className="w-4 h-4 text-red-500 shrink-0" />
                     <span className="truncate">{label}</span>
@@ -712,13 +852,15 @@ export default function App() {
             </div>
 
             {/* Right Column: Live Map Selector Preview */}
-            <div className="lg:col-span-5 bg-[#0d1118]/90 border border-slate-700/40 rounded-xl p-5 space-y-4">
+            <div className="lg:col-span-5 bg-[#0d1118]/90 border border-slate-700/45 rounded-2xl p-5 space-y-3.5">
               <div className="flex items-center justify-between">
-                <span className="font-display font-semibold text-base text-slate-100">Horror Zones</span>
+                <span className="font-display font-semibold text-base text-slate-100">
+                  Horror Zones ({Object.keys(MAPS).length})
+                </span>
                 <span className="text-xs text-slate-400">Live 3D Preview</span>
               </div>
 
-              <div className="space-y-2">
+              <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
                 {(Object.keys(MAPS) as MapId[]).map((mid) => {
                   const m = MAPS[mid];
                   const active = previewMap === mid;
@@ -730,7 +872,7 @@ export default function App() {
                         setPreviewMap(mid);
                         engineRef.current?.loadMap(mid);
                       }}
-                      className={`w-full text-left px-3.5 py-2.5 rounded-lg border transition-colors cursor-pointer ${
+                      className={`w-full text-left px-3.5 py-2.5 rounded-xl border transition-colors cursor-pointer ${
                         active
                           ? 'bg-red-950/35 border-red-600 text-slate-100'
                           : 'bg-[#131924] border-slate-800 text-slate-300 hover:border-slate-600'
@@ -750,23 +892,108 @@ export default function App() {
 
           {/* Flat Control Hint Footer */}
           <footer className="text-xs text-slate-500 flex flex-wrap items-center justify-between gap-2">
-            <span>WASD Move · Mouse Aim &amp; Shoot · R Reload · 1–7 Weapons · H Medkit · F Flashlight · Esc Pause</span>
-            <span>Co-Op Room Limit: 2 Players</span>
+            <span>
+              WASD Move · Hold Fire to Spray · R Reload · 1–7 Weapons · H Medkit · F Flashlight · Esc Pause
+            </span>
+            <span>Endless Waves · Boss Every 5 Waves · 2-Player Co-Op</span>
           </footer>
         </div>
       )}
 
       {/* MULTIPLAYER LOBBY MODAL */}
-      {profile && room && screen === 'menu' && (
+      {profile && room && screen === 'menu' && !voteState && (
         <LobbyModal
           room={room}
           profile={profile}
           friends={friendsList}
-          onToggleReady={() => sendWs('room:ready', { isReady: !room.players.find((p) => p.playerId === profile.id)?.isReady })}
-          onStartMatch={() => sendWs('match:start', {})}
-          onChangeConfig={(mapId, difficulty) => sendWs('room:config', { mapId, difficulty })}
-          onInviteFriend={(friendId) => sendWs('room:invite', { friendId })}
-          onLeaveRoom={() => sendWs('room:leave', {})}
+          onToggleReady={() => {
+            const nextReady = !room.players.find((p) => p.playerId === profile.id)?.isReady;
+            if (localRoomMode) {
+              const updated = toggleLocalReady(room.id, profile.id, nextReady);
+              if (updated) setRoom(updated);
+              return;
+            }
+            sendWs('room:ready', { isReady: nextReady });
+          }}
+          onStartMatch={() => {
+            if (localRoomMode) {
+              openLocalVotePopup(room.mapId);
+              return;
+            }
+            sendWs('room:begin_vote', {});
+          }}
+          onChangeConfig={(mapId, difficulty) => {
+            if (localRoomMode) {
+              const updated = updateLocalRoomConfig(room.id, mapId, difficulty);
+              if (updated) {
+                setRoom(updated);
+                setPreviewMap(updated.mapId);
+                engineRef.current?.loadMap(updated.mapId);
+              }
+              return;
+            }
+            sendWs('room:config', { mapId, difficulty });
+          }}
+          onInviteFriend={(friendId) => {
+            if (localRoomMode) {
+              showToast(`Share Room Code ${room.id} with your teammate.`);
+              return;
+            }
+            sendWs('room:invite', { friendId });
+          }}
+          onLeaveRoom={() => {
+            if (localRoomMode) {
+              leaveLocalRoom(room.id, profile.id);
+              setRoom(null);
+              setLocalRoomMode(false);
+              return;
+            }
+            sendWs('room:leave', {});
+          }}
+        />
+      )}
+
+      {/* PRE-MATCH AREA & MODE VOTE POPUP */}
+      {profile && voteState && screen === 'menu' && (
+        <VoteModal
+          vote={voteState}
+          localPlayerId={profile.id}
+          isHost={!room || room.hostId === profile.id}
+          onVoteMap={(mapId) => {
+            audioEngine.playUiClick();
+            if (voteState.isLocalOnly) {
+              setVoteState((prev) =>
+                prev ? { ...prev, mapVotes: { ...prev.mapVotes, [profile.id]: mapId } } : prev
+              );
+              setPreviewMap(mapId);
+              engineRef.current?.loadMap(mapId);
+            } else {
+              sendWs('room:vote', { mapId });
+            }
+          }}
+          onVoteMode={(modeId) => {
+            audioEngine.playUiClick();
+            if (voteState.isLocalOnly) {
+              setVoteState((prev) =>
+                prev ? { ...prev, modeVotes: { ...prev.modeVotes, [profile.id]: modeId } } : prev
+              );
+            } else {
+              sendWs('room:vote', { gameMode: modeId });
+            }
+          }}
+          onDeployNow={() => {
+            audioEngine.playUiClick();
+            if (voteState.isLocalOnly) {
+              deployLocalVote(voteState);
+            } else {
+              sendWs('room:vote', {
+                mapId: voteState.mapVotes[profile.id] || voteState.mapCandidates[0],
+                gameMode: voteState.modeVotes[profile.id] || voteState.modeCandidates[0],
+                forceStart: true,
+              });
+            }
+          }}
+          onCancel={voteState.isLocalOnly ? () => setVoteState(null) : undefined}
         />
       )}
 
@@ -880,11 +1107,9 @@ export default function App() {
           hitMarker={hitMarker}
           waveBanner={waveBanner}
           damageFlash={damageFlash}
+          healPulse={healPulse}
           mobileControls={mobileControlsEnabled}
-          onPause={() => {
-            setPaused(true);
-            engineRef.current?.setPaused(true);
-          }}
+          onPause={() => setMatchPaused(true)}
           onBuyHealth={() => sendWs('player:buy_health', {})}
           onSwitchWeapon={(wid: WeaponId) => engineRef.current?.switchWeapon(wid)}
           onReload={() => engineRef.current?.triggerReload()}
@@ -895,7 +1120,6 @@ export default function App() {
           onMobileShoot={(active) => engineRef.current?.setMobileShooting(active)}
           onMobileAim={(active) => engineRef.current?.setAiming(active)}
           onMobileJump={() => engineRef.current?.triggerJump()}
-          onCycleWeapon={() => engineRef.current?.cycleWeapon(1)}
         />
       )}
 
@@ -903,12 +1127,16 @@ export default function App() {
       {screen === 'playing' && paused && (
         <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/75">
           <div className="w-full max-w-sm bg-[#0d1118] border border-slate-700/40 rounded-xl p-6 text-center space-y-4">
-            <h2 className="font-display text-2xl font-bold text-slate-100">Match Paused</h2>
+            <div>
+              <h2 className="font-display text-2xl font-bold text-slate-100">Match Paused</h2>
+              <p className="text-xs text-emerald-400 mt-1">
+                All monsters are frozen &amp; cannot attack your squad.
+              </p>
+            </div>
             <div className="space-y-2.5">
               <button
                 onClick={() => {
-                  setPaused(false);
-                  engineRef.current?.setPaused(false);
+                  setMatchPaused(false);
                   engineRef.current?.requestPointerLock();
                 }}
                 className="w-full py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-sm font-semibold text-white cursor-pointer"
@@ -938,7 +1166,7 @@ export default function App() {
           <div className="w-full max-w-lg bg-[#0d1118] border border-slate-700/40 rounded-xl p-6 shadow-2xl">
             <div className="text-center pb-4 border-b border-slate-800">
               <div className={`font-display text-3xl font-bold ${matchResult.victory ? 'text-emerald-400' : 'text-red-500'}`}>
-                {matchResult.victory ? 'DAWN SURVIVED' : 'OVERRUN BY THE HORDE'}
+                {matchResult.victory ? 'LEGENDARY SURVIVAL' : 'OVERRUN BY THE HORDE'}
               </div>
               <div className="text-xs text-slate-400 mt-1 font-mono-num">
                 Waves Cleared: {matchResult.wavesCleared} · Duration: {Math.floor(matchResult.durationSeconds / 60)}m{' '}

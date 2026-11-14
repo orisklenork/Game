@@ -1,4 +1,4 @@
-import { DifficultyId, EquippedLoadout, MapId, WeaponId } from '../shared/gameData';
+import { DifficultyId, EquippedLoadout, GameModeId, MapId, WeaponId } from '../shared/gameData';
 import { handleLocalApiFallback } from './localFallback';
 
 let staticFallbackActive = false;
@@ -58,8 +58,9 @@ export interface RoomState {
   hostId: string;
   mapId: MapId;
   difficulty: DifficultyId;
+  gameMode?: GameModeId;
   isPublicMatchmaking: boolean;
-  status: 'waiting' | 'playing' | 'finished';
+  status: 'waiting' | 'voting' | 'playing' | 'finished';
   maxPlayers: number;
   players: RoomMemberInfo[];
 }

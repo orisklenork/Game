@@ -235,7 +235,7 @@ export function LobbyModal({
                   {mapDef.name} · {mapDef.subtitle}
                 </div>
                 <div className="text-xs text-slate-400 mt-0.5">
-                  Survive 6 escalating waves and defeat the Abomination Titan.
+                  Endless waves with Abomination Titan Boss every 5 waves · Squad votes area &amp; mode at launch.
                 </div>
               </div>
 
@@ -257,7 +257,7 @@ export function LobbyModal({
                     className="flex items-center gap-2 px-6 py-2.5 rounded-lg font-display font-bold text-sm bg-red-600 hover:bg-red-500 text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    <span>{room.players.length === 2 ? 'Start Co-Op Match' : 'Start Solo Match'}</span>
+                    <span>{room.players.length === 2 ? 'Vote & Deploy Co-Op' : 'Vote & Deploy'}</span>
                   </button>
                 )}
               </div>

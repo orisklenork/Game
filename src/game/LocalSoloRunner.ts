@@ -1,5 +1,7 @@
 import {
   DIFFICULTIES,
+  GAME_MODES,
+  GameModeId,
   getWeaponStatsAtLevel,
   HEALTH_PURCHASE_AMOUNT,
   HEALTH_PURCHASE_COST,
@@ -8,6 +10,7 @@ import {
   MONSTERS,
   MapId,
   MonsterType,
+  resolveCircleObstacles,
   WeaponId,
 } from '../shared/gameData';
 import type { PlayerProfile } from '../lib/api';
@@ -32,6 +35,7 @@ interface LocalMonster {
   scoreReward: number;
   xpReward: number;
   attackAnimUntil: number;
+  strafeSign: number;
 }
 
 interface LocalCoin {
@@ -45,6 +49,7 @@ interface LocalCoin {
 export interface LocalMatchCallbacks {
   onStarted: (payload: {
     mapId: MapId;
+    gameMode: GameModeId;
     players: Array<{
       playerId: string;
       username: string;
@@ -86,30 +91,122 @@ export interface LocalMatchCallbacks {
   }) => void;
 }
 
-function buildWaveQueue(wave: number): MonsterType[] {
+function buildWaveQueue(wave: number, gameMode: GameModeId): MonsterType[] {
   const queue: MonsterType[] = [];
-  const total = 5 + wave * 3;
+  const countMult = gameMode === 'blitz' ? 1.3 : gameMode === 'boss_rush' ? 0.92 : 1.0;
+  const total = Math.round((6 + wave * 3) * countMult);
   for (let i = 0; i < total; i++) {
     const r = Math.random();
-    if (wave >= 3 && r < 0.14) queue.push('brute');
-    else if (wave >= 4 && r < 0.25) queue.push('phantom');
-    else if (r < 0.5) queue.push('runner');
-    else if (r < 0.78) queue.push('zombie');
-    else queue.push('crawler');
+    if (gameMode === 'boss_rush') {
+      if (r < 0.25) queue.push('brute');
+      else if (r < 0.48) queue.push('sentinel');
+      else if (r < 0.68) queue.push('howler');
+      else if (r < 0.85) queue.push('spitter');
+      else queue.push('phantom');
+      continue;
+    }
+
+    if (wave === 1) {
+      if (r < 0.55) queue.push('zombie');
+      else if (r < 0.85) queue.push('runner');
+      else queue.push('crawler');
+    } else if (wave === 2) {
+      if (r < 0.3) queue.push('zombie');
+      else if (r < 0.6) queue.push('runner');
+      else if (r < 0.85) queue.push('crawler');
+      else queue.push('spitter');
+    } else if (wave <= 4) {
+      if (r < 0.18) queue.push('zombie');
+      else if (r < 0.36) queue.push('runner');
+      else if (r < 0.52) queue.push('crawler');
+      else if (r < 0.68) queue.push('spitter');
+      else if (r < 0.82) queue.push('howler');
+      else if (r < 0.93) queue.push('brute');
+      else queue.push('phantom');
+    } else {
+      if (r < 0.16) queue.push('runner');
+      else if (r < 0.3) queue.push('crawler');
+      else if (r < 0.45) queue.push('spitter');
+      else if (r < 0.6) queue.push('howler');
+      else if (r < 0.75) queue.push('brute');
+      else if (r < 0.88) queue.push('sentinel');
+      else queue.push('phantom');
+    }
   }
-  if (wave === 3 || wave === 6) {
+  const bossInterval = GAME_MODES[gameMode]?.bossInterval || 5;
+  if (wave % bossInterval === 0) {
     queue.push('boss');
+    if (gameMode === 'boss_rush' && wave >= 10) queue.push('boss');
   }
   return queue;
+}
+
+function moveLocalMonsterWithObstacles(
+  m: LocalMonster,
+  targetX: number,
+  targetZ: number,
+  stepDist: number,
+  mapId: MapId
+) {
+  const map = MAPS[mapId];
+  const start = resolveCircleObstacles(m.x, m.z, m.radius, map);
+  m.x = start.x;
+  m.z = start.z;
+
+  const dx = targetX - m.x;
+  const dz = targetZ - m.z;
+  const dist = Math.hypot(dx, dz) || 0.001;
+  const ux = dx / dist;
+  const uz = dz / dist;
+
+  const direct = resolveCircleObstacles(m.x + ux * stepDist, m.z + uz * stepDist, m.radius, map);
+  const directProgress = (direct.x - m.x) * ux + (direct.z - m.z) * uz;
+
+  if (!direct.collided || directProgress >= stepDist * 0.45) {
+    m.x = direct.x;
+    m.z = direct.z;
+    return;
+  }
+
+  const s = m.strafeSign || 1;
+  const probeAngles = [s * 0.75, -s * 0.75, s * 1.35, -s * 1.35, s * 1.85, -s * 1.85];
+  let bestX = direct.x;
+  let bestZ = direct.z;
+  let bestScore = -Infinity;
+  let chosenSign = s;
+
+  for (const ang of probeAngles) {
+    const cos = Math.cos(ang);
+    const sin = Math.sin(ang);
+    const rx = ux * cos - uz * sin;
+    const rz = ux * sin + uz * cos;
+    const cand = resolveCircleObstacles(m.x + rx * stepDist, m.z + rz * stepDist, m.radius, map);
+    const movedDist = Math.hypot(cand.x - m.x, cand.z - m.z);
+    if (movedDist < stepDist * 0.25) continue;
+
+    const newDist = Math.hypot(targetX - cand.x, targetZ - cand.z);
+    const score = dist - newDist + movedDist * 0.65 - (cand.collided ? 0.15 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestX = cand.x;
+      bestZ = cand.z;
+      chosenSign = ang >= 0 ? 1 : -1;
+    }
+  }
+
+  m.strafeSign = chosenSign;
+  m.x = bestX;
+  m.z = bestZ;
 }
 
 export class LocalSoloRunner {
   private profile: PlayerProfile;
   private mapId: MapId;
+  private gameMode: GameModeId;
   private callbacks: LocalMatchCallbacks;
   private timer: number | null = null;
   private wave = 1;
-  private maxWaves = 6;
+  private maxWaves = 0; // Unlimited!
   private waveState: 'combat' | 'intermission' = 'combat';
   private intermissionEndsAt = 0;
   private monstersToSpawn: MonsterType[] = [];
@@ -117,6 +214,8 @@ export class LocalSoloRunner {
   private monsters = new Map<string, LocalMonster>();
   private coins = new Map<string, LocalCoin>();
   private matchStartedAt = Date.now();
+  private paused = false;
+  private pausedSince: number | null = null;
   private px = 0;
   private py = 0;
   private pz = 2;
@@ -136,20 +235,27 @@ export class LocalSoloRunner {
   private ended = false;
   private idSeq = 1;
 
-  constructor(profile: PlayerProfile, mapId: MapId, callbacks: LocalMatchCallbacks) {
+  constructor(
+    profile: PlayerProfile,
+    mapId: MapId,
+    callbacks: LocalMatchCallbacks,
+    gameMode: GameModeId = 'unlimited'
+  ) {
     this.profile = profile;
     this.mapId = mapId;
+    this.gameMode = gameMode;
     this.callbacks = callbacks;
     this.weaponId = profile.equippedWeapon;
     const spawn = MAPS[mapId].playerSpawns[0] || [0, 2];
     this.px = spawn[0];
     this.pz = spawn[1];
-    this.monstersToSpawn = buildWaveQueue(1);
+    this.monstersToSpawn = buildWaveQueue(1, this.gameMode);
   }
 
   public start() {
     this.callbacks.onStarted({
       mapId: this.mapId,
+      gameMode: this.gameMode,
       players: [
         {
           playerId: this.profile.id,
@@ -169,6 +275,22 @@ export class LocalSoloRunner {
     });
     this.callbacks.onWave({ wave: 1, isBossWave: false });
     this.timer = window.setInterval(() => this.tick(), 50);
+  }
+
+  public setPaused(nextPaused: boolean) {
+    if (this.paused === nextPaused) return;
+    this.paused = nextPaused;
+    if (nextPaused) {
+      this.pausedSince = Date.now();
+    } else if (this.pausedSince) {
+      const delta = Date.now() - this.pausedSince;
+      this.intermissionEndsAt += delta;
+      this.matchStartedAt += delta;
+      this.lastSpawnAt += delta;
+      for (const c of this.coins.values()) c.createdAt += delta;
+      this.pausedSince = null;
+    }
+    this.emitState(Date.now());
   }
 
   public updatePlayerState(payload: {
@@ -197,7 +319,7 @@ export class LocalSoloRunner {
     oz: number;
     rays: Array<{ dx: number; dy: number; dz: number }>;
   }) {
-    if (!this.alive || this.ended) return;
+    if (!this.alive || this.ended || this.paused) return;
     const upg = this.profile.weapons[payload.weaponId]?.upgradeLevel || 1;
     const wStats = getWeaponStatsAtLevel(payload.weaponId, upg);
     const hits: Array<{ monsterId: string; damage: number; killed: boolean; x: number; z: number }> = [];
@@ -282,58 +404,76 @@ export class LocalSoloRunner {
   private tick() {
     if (this.ended) return;
     const now = Date.now();
+    if (this.paused) {
+      this.emitState(now);
+      return;
+    }
+
     const dt = 0.05;
     const mapDef = MAPS[this.mapId];
     const diff = DIFFICULTIES.normal;
+    const modeDef = GAME_MODES[this.gameMode] || GAME_MODES.unlimited;
 
     if (this.waveState === 'intermission') {
       if (now >= this.intermissionEndsAt) {
         this.wave += 1;
         this.waveState = 'combat';
-        this.monstersToSpawn = buildWaveQueue(this.wave);
-        this.callbacks.onWave({ wave: this.wave, isBossWave: this.wave === 3 || this.wave === 6 });
+        this.monstersToSpawn = buildWaveQueue(this.wave, this.gameMode);
+        this.callbacks.onWave({
+          wave: this.wave,
+          isBossWave: this.wave % (modeDef.bossInterval || 5) === 0,
+        });
       }
     } else {
-      if (this.monstersToSpawn.length > 0 && now - this.lastSpawnAt >= 750 && this.monsters.size < 18) {
+      if (
+        this.monstersToSpawn.length > 0 &&
+        now - this.lastSpawnAt >= modeDef.spawnIntervalMs &&
+        this.monsters.size < 22
+      ) {
         const type = this.monstersToSpawn.shift()!;
         const sp = mapDef.monsterSpawns[Math.floor(Math.random() * mapDef.monsterSpawns.length)] || [0, -20];
         const mDef = MONSTERS[type];
         const waveScale = 1 + (this.wave - 1) * 0.14;
+        const resolved = resolveCircleObstacles(
+          sp[0] + (Math.random() - 0.5) * 1.5,
+          sp[1] + (Math.random() - 0.5) * 1.5,
+          mDef.radius,
+          mapDef
+        );
         const id = `m-${this.idSeq++}`;
         this.monsters.set(id, {
           id,
           type,
-          x: sp[0] + (Math.random() - 0.5) * 2,
-          z: sp[1] + (Math.random() - 0.5) * 2,
+          x: resolved.x,
+          z: resolved.z,
           yaw: 0,
-          hp: Math.round(mDef.hp * diff.hpMult * waveScale),
-          maxHp: Math.round(mDef.hp * diff.hpMult * waveScale),
-          speed: mDef.speed * diff.speedMult,
+          hp: Math.round(mDef.hp * diff.hpMult * modeDef.hpMult * waveScale),
+          maxHp: Math.round(mDef.hp * diff.hpMult * modeDef.hpMult * waveScale),
+          speed: mDef.speed * diff.speedMult * modeDef.speedMult * (1 + Math.min(0.28, (this.wave - 1) * 0.02)),
           damage: Math.round(mDef.damage * diff.dmgMult),
           attackRange: mDef.attackRange,
           attackCooldown: mDef.attackCooldown * 1000,
           lastAttackAt: 0,
           radius: mDef.radius,
-          coinReward: mDef.coinReward,
-          scoreReward: mDef.scoreReward,
-          xpReward: mDef.xpReward,
+          coinReward: Math.round(mDef.coinReward * modeDef.rewardMult),
+          scoreReward: Math.round(mDef.scoreReward * modeDef.rewardMult),
+          xpReward: Math.round(mDef.xpReward * modeDef.rewardMult),
           attackAnimUntil: 0,
+          strafeSign: Math.random() < 0.5 ? 1 : -1,
         });
         this.lastSpawnAt = now;
       }
 
       if (this.monstersToSpawn.length === 0 && this.monsters.size === 0) {
-        if (this.wave >= this.maxWaves) {
-          this.finish(true);
-          return;
-        }
+        // Endless waves! Small wave clear heal
+        this.hp = Math.min(this.maxHp, this.hp + 18);
         this.waveState = 'intermission';
-        this.intermissionEndsAt = now + 4500;
+        this.intermissionEndsAt = now + 4000;
         this.callbacks.onWaveCleared({ clearedWave: this.wave, nextWave: this.wave + 1 });
       }
     }
 
-    // Move monsters toward player
+    // Move monsters with obstacle avoidance
     for (const m of this.monsters.values()) {
       const dx = this.px - m.x;
       const dz = this.pz - m.z;
@@ -342,8 +482,7 @@ export class LocalSoloRunner {
 
       if (dist > m.attackRange * 0.85) {
         const step = Math.min(dist, m.speed * dt);
-        m.x += (dx / dist) * step;
-        m.z += (dz / dist) * step;
+        moveLocalMonsterWithObstacles(m, this.px, this.pz, step, this.mapId);
       } else if (now - m.lastAttackAt >= m.attackCooldown && this.alive) {
         m.lastAttackAt = now;
         m.attackAnimUntil = now + 260;
@@ -357,13 +496,37 @@ export class LocalSoloRunner {
       }
     }
 
+    // Soft separation between monsters
+    const arr = Array.from(this.monsters.values());
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const a = arr[i];
+        const b = arr[j];
+        const sdx = b.x - a.x;
+        const sdz = b.z - a.z;
+        const sd = Math.hypot(sdx, sdz);
+        const minSep = (a.radius + b.radius) * 0.85;
+        if (sd > 0.0001 && sd < minSep) {
+          const push = (minSep - sd) * 0.35;
+          const nx = sdx / sd;
+          const nz = sdz / sd;
+          const pa = resolveCircleObstacles(a.x - nx * push, a.z - nz * push, a.radius, mapDef);
+          const pb = resolveCircleObstacles(b.x + nx * push, b.z + nz * push, b.radius, mapDef);
+          a.x = pa.x;
+          a.z = pa.z;
+          b.x = pb.x;
+          b.z = pb.z;
+        }
+      }
+    }
+
     // Collect nearby coins
     for (const [cid, c] of this.coins.entries()) {
-      if (now - c.createdAt > 25000) {
+      if (now - c.createdAt > 35000) {
         this.coins.delete(cid);
         continue;
       }
-      if (Math.hypot(this.px - c.x, this.pz - c.z) <= 1.8) {
+      if (Math.hypot(this.px - c.x, this.pz - c.z) <= 2.2) {
         this.coins.delete(cid);
         this.coinsEarned += c.value;
         this.score += c.value * 5;
@@ -371,13 +534,19 @@ export class LocalSoloRunner {
       }
     }
 
+    this.emitState(now);
+  }
+
+  private emitState(now: number) {
     this.callbacks.onState({
       t: now,
-      elapsedSec: Math.floor((now - this.matchStartedAt) / 1000),
+      elapsedSec: Math.floor(((this.pausedSince ?? now) - this.matchStartedAt) / 1000),
       wave: this.wave,
       maxWaves: this.maxWaves,
       waveState: this.waveState,
       remainingToSpawn: this.monstersToSpawn.length,
+      pausedBy: this.paused ? [this.profile.username] : [],
+      gameMode: this.gameMode,
       players: [
         {
           playerId: this.profile.id,
@@ -405,7 +574,7 @@ export class LocalSoloRunner {
         yaw: m.yaw,
         hp: m.hp,
         maxHp: m.maxHp,
-        attacking: now < m.attackAnimUntil,
+        attacking: !this.paused && now < m.attackAnimUntil,
       })),
       coins: Array.from(this.coins.values()).map((c) => ({ id: c.id, x: c.x, z: c.z, value: c.value })),
     });
@@ -419,15 +588,16 @@ export class LocalSoloRunner {
       this.timer = null;
     }
     const durationSeconds = Math.max(1, Math.floor((Date.now() - this.matchStartedAt) / 1000));
-    const wavesCleared = victory ? this.maxWaves : Math.max(0, this.wave - 1);
-    const totalCoins = this.coinsEarned + (victory ? 150 : 0);
-    const totalXp = this.xpEarned + (victory ? 120 : 25);
+    const wavesCleared = Math.max(0, this.wave - 1);
+    const modeDef = GAME_MODES[this.gameMode] || GAME_MODES.unlimited;
+    const totalCoins = this.coinsEarned + Math.round(wavesCleared * 25 * modeDef.rewardMult);
+    const totalXp = this.xpEarned + Math.round(wavesCleared * 30 * modeDef.rewardMult);
 
     const updatedProfile = recordLocalMatchOutcome({
       mapId: this.mapId,
       difficulty: 'normal',
       wavesCleared,
-      victory,
+      victory: victory || wavesCleared >= 5,
       durationSeconds,
       kills: this.kills,
       bossKills: this.bossKills,
@@ -437,7 +607,7 @@ export class LocalSoloRunner {
     });
 
     this.callbacks.onEnded({
-      victory,
+      victory: victory || wavesCleared >= 5,
       wavesCleared,
       durationSeconds,
       profile: updatedProfile,

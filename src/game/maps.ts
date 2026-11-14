@@ -40,13 +40,17 @@ export function buildHorrorMap(
       ? textures.mansionFloor
       : mapId === 'lab'
       ? textures.labFloor
+      : mapId === 'catacombs'
+      ? textures.catacombsFloor
+      : mapId === 'subway'
+      ? textures.subwayFloor
       : textures.schoolFloor;
 
   const floorMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: floorTex,
-      roughness: mapId === 'hospital' || mapId === 'lab' ? 0.48 : 0.85,
-      metalness: mapId === 'lab' ? 0.35 : 0.08,
+      roughness: mapId === 'hospital' || mapId === 'lab' ? 0.36 : mapId === 'subway' ? 0.52 : 0.82,
+      metalness: mapId === 'lab' ? 0.38 : mapId === 'subway' ? 0.22 : 0.1,
     })
   );
   const floor = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(floorSize, floorSize)), floorMat);
@@ -55,10 +59,10 @@ export function buildHorrorMap(
   group.add(floor);
 
   // Lighting: Warm/Cool Contrast + Key Directional Light
-  const hemi = new THREE.HemisphereLight(def.lightColor, '#0b0d12', 0.65);
+  const hemi = new THREE.HemisphereLight(def.lightColor, '#0b0d12', 0.78);
   group.add(hemi);
 
-  const dirLight = new THREE.DirectionalLight(def.lightColor, 1.15);
+  const dirLight = new THREE.DirectionalLight(def.lightColor, 1.25);
   dirLight.position.set(18, 32, 16);
   if (!isSoftwareGl && quality !== 'low') {
     dirLight.castShadow = true;
@@ -83,13 +87,17 @@ export function buildHorrorMap(
       ? textures.mansionWall
       : mapId === 'lab'
       ? textures.labWall
+      : mapId === 'catacombs'
+      ? textures.catacombsWall
+      : mapId === 'subway'
+      ? textures.subwayWall
       : textures.schoolWall;
 
   const wallMat = trackMat(
     new THREE.MeshStandardMaterial({
       map: def.outdoor ? textures.bark : wallTex,
-      roughness: mapId === 'lab' ? 0.42 : 0.82,
-      metalness: mapId === 'lab' ? 0.45 : 0.08,
+      roughness: mapId === 'lab' ? 0.42 : 0.78,
+      metalness: mapId === 'lab' || mapId === 'subway' ? 0.35 : 0.1,
     })
   );
 
