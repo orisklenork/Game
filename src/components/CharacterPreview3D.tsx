@@ -43,7 +43,9 @@ export function CharacterPreview3D({ loadout, weaponId, className = '' }: Props)
     sceneRef.current = scene;
 
     const pmrem = new THREE.PMREMGenerator(renderer);
-    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    const roomEnv = new RoomEnvironment();
+    scene.environment = pmrem.fromScene(roomEnv, 0.04).texture;
+    roomEnv.dispose();
     pmrem.dispose();
 
     const camera = new THREE.PerspectiveCamera(40, (el.clientWidth || 320) / (el.clientHeight || 420), 0.1, 30);

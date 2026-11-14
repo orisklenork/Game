@@ -1,4 +1,11 @@
 import { DifficultyId, EquippedLoadout, MapId, WeaponId } from '../shared/gameData';
+import { handleLocalApiFallback } from './localFallback';
+
+let staticFallbackActive = false;
+
+export function isStaticMode(): boolean {
+  return staticFallbackActive;
+}
 
 export interface PlayerProfile {
   id: string;
@@ -72,6 +79,9 @@ export function clearToken() {
 }
 
 export async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  if (staticFallbackActive) {
+    return handleLocalApiFallback(path, options) as T;
+  }
   const token = getSavedToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -81,6 +91,10 @@ export async function apiFetch<T = any>(path: string, options: RequestInit = {})
     headers['Authorization'] = `Bearer ${token}`;
   }
   const res = await fetch(path, { ...options, headers });
+  if (res.status === 404) {
+    staticFallbackActive = true;
+    return handleLocalApiFallback(path, options) as T;
+  }
   const text = await res.text();
   let data: any = {};
   if (text) {

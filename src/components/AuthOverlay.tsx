@@ -50,9 +50,9 @@ export function AuthOverlay({ onAuthenticated }: Props) {
     const timer = window.setTimeout(async () => {
       setChecking(true);
       try {
-        const res = await fetch(`/api/auth/check-username?username=${encodeURIComponent(trimmed)}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const data = await apiFetch<{ valid: boolean; available: boolean; reason?: string }>(
+          `/api/auth/check-username?username=${encodeURIComponent(trimmed)}`
+        );
         if (!cancelled) {
           setAvailability({
             checked: true,

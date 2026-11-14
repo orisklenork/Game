@@ -26,7 +26,8 @@ import { ShopAndCustomize } from './components/ShopAndCustomize';
 import { SocialAndProfile } from './components/SocialAndProfile';
 import { audioEngine } from './game/audio';
 import { HorrorGameEngine, HudSnapshot, ServerStatePacket } from './game/GameEngine';
-import { apiFetch, getSavedToken, PlayerProfile, RoomState } from './lib/api';
+import { LocalSoloRunner } from './game/LocalSoloRunner';
+import { apiFetch, getSavedToken, isStaticMode, PlayerProfile, RoomState } from './lib/api';
 import { DifficultyId, MapId, MAPS, WeaponId } from './shared/gameData';
 
 type ActiveModal =
@@ -101,6 +102,8 @@ export default function App() {
   const canvasMountRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<HorrorGameEngine | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsFailedRef = useRef(false);
+  const localRunnerRef = useRef<LocalSoloRunner | null>(null);
   const pendingWsQueueRef = useRef<Array<{ type: string; payload: any }>>([]);
 
   const [booting, setBooting] = useState(true);
@@ -156,10 +159,21 @@ export default function App() {
   }, []);
 
   const sendWs = useCallback((type: string, payload: any = {}) => {
+    const runner = localRunnerRef.current;
+    if (runner) {
+      if (type === 'player:state') runner.updatePlayerState(payload);
+      else if (type === 'player:shoot') runner.handleShoot(payload);
+      else if (type === 'player:buy_health') runner.buyHealth();
+      else if (type === 'match:abort') {
+        runner.abort();
+        localRunnerRef.current = null;
+      }
+      return;
+    }
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type, payload }));
-    } else {
+    } else if (!isStaticMode()) {
       pendingWsQueueRef.current.push({ type, payload });
     }
   }, []);
@@ -232,21 +246,28 @@ export default function App() {
   // WebSocket connection lifecycle
   useEffect(() => {
     if (!token || !profile) return;
+    if (isStaticMode() || token.startsWith('local-token-')) return;
     let closedByUser = false;
     let reconnectTimer: number | null = null;
 
     const connect = () => {
+      if (isStaticMode()) return;
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
       wsRef.current = ws;
 
       ws.onopen = () => {
+        wsFailedRef.current = false;
         ws.send(JSON.stringify({ type: 'auth', payload: { token } }));
         while (pendingWsQueueRef.current.length > 0) {
           const queued = pendingWsQueueRef.current.shift();
           if (queued) ws.send(JSON.stringify(queued));
         }
         refreshFriends();
+      };
+
+      ws.onerror = () => {
+        wsFailedRef.current = true;
       };
 
       ws.onmessage = (event) => {
@@ -397,10 +418,81 @@ export default function App() {
     };
   }, [token, profile?.id, refreshFriends, showToast]);
 
+  const startLocalSoloMatch = () => {
+    if (!profile) return;
+    if (localRunnerRef.current) {
+      localRunnerRef.current.abort();
+      localRunnerRef.current = null;
+    }
+    const runner = new LocalSoloRunner(profile, previewMap, {
+      onStarted: (payload) => {
+        audioEngine.unlock();
+        audioEngine.startAmbientMusic();
+        setMatchResult(null);
+        setPaused(false);
+        setActiveModal(null);
+        setScreen('playing');
+        setWaveBanner('WAVE 1 STARTING');
+        window.setTimeout(() => setWaveBanner(null), 2400);
+        const skinId = profile.equippedLoadout.weapon_skin || 'wskin_factory';
+        engineRef.current?.startMatch({
+          localPlayerId: profile.id,
+          mapId: payload.mapId,
+          equippedWeapon: profile.equippedWeapon,
+          ownedWeapons: profile.weapons,
+          weaponSkinId: skinId,
+          players: payload.players,
+        });
+      },
+      onState: (pkt) => engineRef.current?.applyServerState(pkt),
+      onWave: (p) => {
+        setWaveBanner(p.isBossWave ? `BOSS WAVE ${p.wave}` : `WAVE ${p.wave}`);
+        window.setTimeout(() => setWaveBanner(null), 2600);
+      },
+      onWaveCleared: (p) => {
+        setWaveBanner(`WAVE CLEARED · NEXT WAVE ${p.nextWave}`);
+        window.setTimeout(() => setWaveBanner(null), 2500);
+      },
+      onHitConfirm: (p) => engineRef.current?.handleHitConfirm(p.hits),
+      onPlayerHit: () => {
+        engineRef.current?.handlePlayerDamageFx();
+        setDamageFlash(true);
+        window.setTimeout(() => setDamageFlash(false), 200);
+      },
+      onCoinCollected: () => audioEngine.playCoinPickup(),
+      onHealthPurchased: (p) => {
+        audioEngine.playHeal();
+        setProfile((curr) => (curr ? { ...curr, coins: p.newCoinBalance } : curr));
+        showToast(`Medkit applied (${p.remainingPurchases} left)`);
+      },
+      onHealthError: (p) => showToast(p.message),
+      onEnded: (p) => {
+        localRunnerRef.current = null;
+        audioEngine.setBossMusic(false);
+        setScreen('menu');
+        setPaused(false);
+        engineRef.current?.setDioramaMode();
+        if (p.profile) setProfile(p.profile);
+        setMatchResult({
+          victory: p.victory,
+          wavesCleared: p.wavesCleared,
+          durationSeconds: p.durationSeconds,
+          results: p.results,
+        });
+      },
+    });
+    localRunnerRef.current = runner;
+    runner.start();
+  };
+
   const handlePlaySoloNow = () => {
     audioEngine.unlock();
     audioEngine.startAmbientMusic();
     audioEngine.playUiClick();
+    if (isStaticMode() || wsFailedRef.current) {
+      startLocalSoloMatch();
+      return;
+    }
     // Create a room and immediately start match if solo
     sendWs('room:create', { mapId: previewMap, difficulty: 'normal', isPublic: false });
     window.setTimeout(() => {
@@ -412,6 +504,10 @@ export default function App() {
     audioEngine.unlock();
     audioEngine.startAmbientMusic();
     audioEngine.playUiClick();
+    if (isStaticMode() || wsFailedRef.current) {
+      showToast('Co-Op rooms require the live server. Use Play Now for Solo Survival.');
+      return;
+    }
     sendWs('room:create', { mapId: previewMap, difficulty: 'normal', isPublic: false });
   };
 
@@ -419,12 +515,20 @@ export default function App() {
     audioEngine.unlock();
     audioEngine.startAmbientMusic();
     audioEngine.playUiClick();
+    if (isStaticMode() || wsFailedRef.current) {
+      showToast('Matchmaking requires the live server. Use Play Now for Solo Survival.');
+      return;
+    }
     sendWs('room:find_player', { mapId: previewMap, difficulty: 'normal' });
   };
 
   const handleOpenJoinModal = () => {
     audioEngine.unlock();
     audioEngine.playUiClick();
+    if (isStaticMode() || wsFailedRef.current) {
+      showToast('Joining Co-Op rooms requires the live server. Use Play Now for Solo Survival.');
+      return;
+    }
     sendWs('room:list_open', {});
     setActiveModal('join_room');
   };

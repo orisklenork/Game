@@ -299,7 +299,7 @@ export class HorrorGameEngine {
     this.renderer.toneMappingExposure = 1.15;
     this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
 
     this.renderer.domElement.style.display = 'block';
@@ -317,7 +317,9 @@ export class HorrorGameEngine {
 
     // Studio procedural environment map for metallic PBR weapons & armor
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    const roomEnv = new RoomEnvironment();
+    this.scene.environment = pmrem.fromScene(roomEnv, 0.04).texture;
+    roomEnv.dispose();
     pmrem.dispose();
 
     this.textures = createProceduralTextures(this.renderer);
@@ -348,10 +350,6 @@ export class HorrorGameEngine {
     this.loadMap('hospital');
     this.bindEvents();
 
-    if (!this.isSoftwareGl) {
-      this.renderer.compile(this.scene, this.camera);
-    }
-
     this.scheduleNextTick();
   }
 
@@ -370,6 +368,7 @@ export class HorrorGameEngine {
   }
 
   public setQuality(q: 'low' | 'medium' | 'high') {
+    if (this.quality === q) return;
     this.quality = q;
     if (!this.isSoftwareGl) {
       this.renderer.shadowMap.enabled = q !== 'low';
