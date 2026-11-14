@@ -1,0 +1,351 @@
+import { WeaponId } from '../shared/gameData';
+
+class HorrorAudioEngine {
+  private ctx: AudioContext | null = null;
+  private masterGain: GainNode | null = null;
+  private musicGain: GainNode | null = null;
+  private sfxGain: GainNode | null = null;
+  private musicNodes: AudioNode[] = [];
+  private bossMode = false;
+  private muted = false;
+  private musicVolume = 0.35;
+  private sfxVolume = 0.7;
+  private musicPlaying = false;
+  private heartbeatTimer: number | null = null;
+
+  private ensureContext(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+    if (!this.ctx) {
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return null;
+      this.ctx = new AC();
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = this.muted ? 0 : 1;
+      this.masterGain.connect(this.ctx.destination);
+
+      this.musicGain = this.ctx.createGain();
+      this.musicGain.gain.value = this.musicVolume;
+      this.musicGain.connect(this.masterGain);
+
+      this.sfxGain = this.ctx.createGain();
+      this.sfxGain.gain.value = this.sfxVolume;
+      this.sfxGain.connect(this.masterGain);
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+    return this.ctx;
+  }
+
+  public unlock() {
+    this.ensureContext();
+  }
+
+  public setMuted(muted: boolean) {
+    this.muted = muted;
+    if (this.masterGain && this.ctx) {
+      this.masterGain.gain.setTargetAtTime(muted ? 0 : 1, this.ctx.currentTime, 0.03);
+    }
+  }
+
+  public isMuted() {
+    return this.muted;
+  }
+
+  public setVolumes(sfx: number, music: number) {
+    this.sfxVolume = sfx;
+    this.musicVolume = music;
+    if (this.sfxGain && this.ctx) this.sfxGain.gain.setTargetAtTime(sfx, this.ctx.currentTime, 0.05);
+    if (this.musicGain && this.ctx) this.musicGain.gain.setTargetAtTime(music, this.ctx.currentTime, 0.05);
+  }
+
+  public startAmbientMusic() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.musicGain || this.musicPlaying) return;
+    this.musicPlaying = true;
+
+    // Dark sub-bass drone + eerie detuned fifth
+    const freqs = [46.25, 69.3, 92.5];
+    for (const f of freqs) {
+      const osc = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const g = ctx.createGain();
+      osc.type = f < 60 ? 'sawtooth' : 'triangle';
+      osc.frequency.value = f;
+      filter.type = 'lowpass';
+      filter.frequency.value = 180;
+      g.gain.value = f < 60 ? 0.14 : 0.07;
+      osc.connect(filter);
+      filter.connect(g);
+      g.connect(this.musicGain);
+      osc.start();
+      this.musicNodes.push(osc, filter, g);
+    }
+
+    // Slow horror pulse / boss tension
+    this.heartbeatTimer = window.setInterval(() => {
+      if (!this.ctx || !this.musicGain || this.muted || this.ctx.state !== 'running') return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(this.bossMode ? 68 : 48, now);
+      osc.frequency.exponentialRampToValueAtTime(28, now + 0.25);
+      g.gain.setValueAtTime(this.bossMode ? 0.28 : 0.1, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      osc.connect(g);
+      g.connect(this.musicGain);
+      osc.start(now);
+      osc.stop(now + 0.38);
+    }, 950);
+  }
+
+  public setBossMusic(active: boolean) {
+    this.bossMode = active;
+  }
+
+  public stopMusic() {
+    this.musicPlaying = false;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    for (const n of this.musicNodes) {
+      if ('stop' in n && typeof (n as any).stop === 'function') {
+        try {
+          (n as any).stop();
+        } catch {}
+      }
+      n.disconnect();
+    }
+    this.musicNodes = [];
+  }
+
+  private createNoiseBuffer(ctx: AudioContext, duration: number): AudioBuffer {
+    const len = Math.floor(ctx.sampleRate * duration);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    return buf;
+  }
+
+  public playUiClick() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(520, now);
+    osc.frequency.exponentialRampToValueAtTime(220, now + 0.045);
+    g.gain.setValueAtTime(0.14, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.055);
+  }
+
+  public playGunshot(weaponId: WeaponId, volumeScale = 1) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+
+    if (weaponId === 'plasma') {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(1100, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.24);
+      g.gain.setValueAtTime(0.4 * volumeScale, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+      osc.connect(g);
+      g.connect(this.sfxGain);
+      osc.start(now);
+      osc.stop(now + 0.27);
+      return;
+    }
+
+    const dur = weaponId === 'shotgun' || weaponId === 'sniper' ? 0.28 : weaponId === 'lmg' ? 0.13 : 0.11;
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.createNoiseBuffer(ctx, dur);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value =
+      weaponId === 'shotgun' ? 680 : weaponId === 'sniper' ? 950 : weaponId === 'smg' ? 1600 : 1200;
+    filter.Q.value = 0.7;
+
+    const g = ctx.createGain();
+    const peak = (weaponId === 'shotgun' || weaponId === 'sniper' ? 0.65 : 0.42) * volumeScale;
+    g.gain.setValueAtTime(peak, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noise.connect(filter);
+    filter.connect(g);
+    g.connect(this.sfxGain);
+    noise.start(now);
+
+    // Low punch thump
+    const thump = ctx.createOscillator();
+    const tg = ctx.createGain();
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime(weaponId === 'sniper' ? 170 : 130, now);
+    thump.frequency.exponentialRampToValueAtTime(38, now + 0.09);
+    tg.gain.setValueAtTime(0.35 * volumeScale, now);
+    tg.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    thump.connect(tg);
+    tg.connect(this.sfxGain);
+    thump.start(now);
+    thump.stop(now + 0.11);
+  }
+
+  public playReload() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    [0, 0.24].forEach((offset, idx) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(idx === 0 ? 380 : 620, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(160, now + offset + 0.05);
+      g.gain.setValueAtTime(0.16, now + offset);
+      g.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.06);
+      osc.connect(g);
+      g.connect(this.sfxGain!);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.065);
+    });
+  }
+
+  public playHitMarker(killed = false) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(killed ? 980 : 680, now);
+    osc.frequency.exponentialRampToValueAtTime(killed ? 1480 : 420, now + 0.07);
+    g.gain.setValueAtTime(killed ? 0.26 : 0.15, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.09);
+  }
+
+  public playMonsterGrowl(isBoss = false) {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const g = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(isBoss ? 58 : 95, now);
+    osc.frequency.linearRampToValueAtTime(isBoss ? 36 : 62, now + 0.42);
+    filter.type = 'lowpass';
+    filter.frequency.value = isBoss ? 260 : 420;
+    g.gain.setValueAtTime(0.01, now);
+    g.gain.linearRampToValueAtTime(isBoss ? 0.34 : 0.18, now + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.48);
+  }
+
+  public playMonsterDeath() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(160, now);
+    osc.frequency.exponentialRampToValueAtTime(34, now + 0.28);
+    g.gain.setValueAtTime(0.24, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.31);
+  }
+
+  public playCoinPickup() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    [880, 1320].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + i * 0.055);
+      g.gain.setValueAtTime(0.18, now + i * 0.055);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.055 + 0.14);
+      osc.connect(g);
+      g.connect(this.sfxGain!);
+      osc.start(now + i * 0.055);
+      osc.stop(now + i * 0.055 + 0.15);
+    });
+  }
+
+  public playHeal() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(360, now);
+    osc.frequency.exponentialRampToValueAtTime(720, now + 0.25);
+    g.gain.setValueAtTime(0.22, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+
+  public playPlayerHurt() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(140, now);
+    osc.frequency.exponentialRampToValueAtTime(48, now + 0.18);
+    g.gain.setValueAtTime(0.32, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    osc.connect(g);
+    g.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.21);
+  }
+
+  public playFootstep() {
+    const ctx = this.ensureContext();
+    if (!ctx || !this.sfxGain || this.muted) return;
+    const now = ctx.currentTime;
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.createNoiseBuffer(ctx, 0.05);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 340;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.08, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+    noise.connect(filter);
+    filter.connect(g);
+    g.connect(this.sfxGain);
+    noise.start(now);
+  }
+}
+
+export const audioEngine = new HorrorAudioEngine();

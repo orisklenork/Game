@@ -1,0 +1,6 @@
+{
+  "name": "Nightfall",
+  "description": "Two-player 3D multiplayer horror survival shooter with cooperative waves, custom loadouts, five haunted maps, and persistent progression.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
