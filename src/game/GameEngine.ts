@@ -1,15 +1,19 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import {
+  DEFAULT_LOADOUT,
   EquippedLoadout,
   GAME_MODES,
   GameModeId,
+  getHealthPurchaseCost,
   getWeaponStatsAtLevel,
   MapId,
   MAPS,
   MonsterType,
   resolveCircleObstacles,
+  segmentHitsObstacleDist,
   WEAPON_ORDER,
+  WeaponClass,
   WeaponId,
 } from '../shared/gameData';
 import { audioEngine } from './audio';
@@ -18,12 +22,15 @@ import {
   buildMedkitModel,
   buildMonsterModel,
   buildPlayerCharacterModel,
+  buildProjectileMesh,
   buildWeaponModel,
   MonsterModelHandle,
   PlayerModelHandle,
   WeaponModelHandle,
 } from './models';
 import { createProceduralTextures, ProceduralTextureSet } from './textures';
+
+export type CameraViewMode = '1st' | '2nd' | '3rd';
 
 export interface HudSnapshot {
   hp: number;
@@ -35,10 +42,13 @@ export interface HudSnapshot {
   reloadProgress: number;
   weaponId: WeaponId;
   weaponName: string;
+  weaponClass: WeaponClass;
+  isMelee: boolean;
   kills: number;
   score: number;
   coinsEarned: number;
   healthPurchasesUsed: number;
+  medkitCost: number;
   wave: number;
   maxWaves: number;
   waveState: 'combat' | 'intermission';
@@ -46,10 +56,20 @@ export interface HudSnapshot {
   monstersRemaining: number;
   flashlightOn: boolean;
   pointerLocked: boolean;
+  cameraView: CameraViewMode;
   gameMode: GameModeId;
   pausedBy: string[];
   boss: { name: string; hp: number; maxHp: number } | null;
+  duel?: {
+    round: number;
+    roundsToWin: number;
+    roundState: 'fighting' | 'intermission';
+    roundTimeLeftSec: number;
+    roundScores: Record<string, number>;
+    roundWinnerId: string | null;
+  };
   teammate: {
+    playerId: string;
     username: string;
     hp: number;
     maxHp: number;
@@ -64,6 +84,7 @@ export interface HudSnapshot {
     playerYaw: number;
     monsters: Array<{ x: number; z: number; isBoss: boolean }>;
     coins: Array<{ x: number; z: number }>;
+    opponent: { x: number; z: number; alive: boolean } | null;
   };
 }
 
@@ -91,6 +112,14 @@ export interface ServerStatePacket {
   remainingToSpawn: number;
   pausedBy?: string[];
   gameMode?: GameModeId;
+  duel?: {
+    round: number;
+    roundsToWin: number;
+    roundState: 'fighting' | 'intermission';
+    roundTimeLeftSec: number;
+    roundScores: Record<string, number>;
+    roundWinnerId: string | null;
+  };
   players: Array<{
     playerId: string;
     x: number;
@@ -119,6 +148,8 @@ export interface ServerStatePacket {
     attacking: boolean;
   }>;
   coins: Array<{ id: string; x: number; z: number; value: number }>;
+  projectiles?: Array<{ id: string; kind: string; x: number; y: number; z: number }>;
+  fireZones?: Array<{ id: string; kind: string; x: number; z: number; radius: number; color: string }>;
 }
 
 export interface EngineCallbacks {
@@ -132,6 +163,15 @@ export interface EngineCallbacks {
     dy: number;
     dz: number;
     rays: Array<{ dx: number; dy: number; dz: number }>;
+  }) => void;
+  onThrow: (payload: {
+    weaponId: WeaponId;
+    ox: number;
+    oy: number;
+    oz: number;
+    dx: number;
+    dy: number;
+    dz: number;
   }) => void;
   onPlayerStateSend: (payload: {
     x: number;
@@ -192,6 +232,11 @@ export class HorrorGameEngine {
 
   // Local player state
   private localPlayerId = '';
+  private localLoadout: EquippedLoadout = DEFAULT_LOADOUT;
+  private localPlayerModel: PlayerModelHandle | null = null;
+  private localWalkPhase = 0;
+  private cameraView: CameraViewMode = '1st';
+  private typingChat = false;
   private ownedWeapons: Record<string, { upgradeLevel: number }> = { pistol: { upgradeLevel: 1 } };
   private equippedWeapon: WeaponId = 'pistol';
   private weaponSkinId = 'wskin_factory';
@@ -200,6 +245,7 @@ export class HorrorGameEngine {
   private reloadTimer = 0;
   private reloadDuration = 1;
   private fireCooldown = 0;
+  private meleeSwingTimer = 0;
   private aiming = false;
   private flashlightOn = true;
   private sensitivity = 0.0022;
@@ -228,6 +274,7 @@ export class HorrorGameEngine {
   private muzzleLight = new THREE.PointLight(0xffb84d, 0, 9);
   private flashlight: THREE.SpotLight;
   private flashlightTarget = new THREE.Object3D();
+  private laserLine: THREE.Line;
 
   // Input state (continuous held vs edge justPressed)
   private heldKeys = new Set<string>();
@@ -237,6 +284,7 @@ export class HorrorGameEngine {
 
   // Authoritative synced entities
   private gameMode: GameModeId = 'unlimited';
+  private duelState: ServerStatePacket['duel'] | undefined = undefined;
   private pausedBy: string[] = [];
   private activeBoss: { name: string; hp: number; maxHp: number } | null = null;
   private wave = 1;
@@ -273,6 +321,8 @@ export class HorrorGameEngine {
   >();
 
   private coins = new Map<string, { mesh: THREE.Mesh; x: number; z: number }>();
+  private projectiles = new Map<string, { kind: string; mesh: THREE.Group }>();
+  private fireZones = new Map<string, { mesh: THREE.Mesh; radius: number }>();
   private coinGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.07, 14);
   private coinMat = new THREE.MeshStandardMaterial({
     color: 0xf59e0b,
@@ -376,6 +426,14 @@ export class HorrorGameEngine {
       this.tracers.push({ line, life: 0 });
     }
 
+    // Laser sight line for 2nd/3rd person tactical aim
+    const laserGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -10)]);
+    const laserMat = new THREE.LineBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.55 });
+    this.laserLine = new THREE.Line(laserGeo, laserMat);
+    this.laserLine.visible = false;
+    this.laserLine.frustumCulled = false;
+    this.scene.add(this.laserLine);
+
     this.loadMap('hospital');
     this.bindEvents();
 
@@ -418,11 +476,18 @@ export class HorrorGameEngine {
   public setDioramaMode(mapId?: MapId) {
     this.mode = 'diorama';
     this.paused = false;
+    this.typingChat = false;
     this.pausedBy = [];
+    this.duelState = undefined;
     this.activeBoss = null;
     this.medkitAnimTimer = 0;
     this.medkitGroup.visible = false;
     this.viewModelAnchor.visible = false;
+    this.laserLine.visible = false;
+    if (this.localPlayerModel) {
+      this.scene.remove(this.localPlayerModel.group);
+      this.localPlayerModel = null;
+    }
     this.flashlight.intensity = 0;
     this.camera.rotation.set(0, 0, 0, 'XYZ');
     this.clearMatchEntities();
@@ -441,12 +506,16 @@ export class HorrorGameEngine {
     equippedWeapon: WeaponId;
     ownedWeapons: Record<string, { upgradeLevel: number }>;
     weaponSkinId: string;
+    localLoadout?: EquippedLoadout;
     players: RemotePlayerData[];
   }) {
     this.localPlayerId = params.localPlayerId;
     this.gameMode = params.gameMode || 'unlimited';
+    this.localLoadout = params.localLoadout || DEFAULT_LOADOUT;
     this.pausedBy = [];
+    this.duelState = undefined;
     this.activeBoss = null;
+    this.typingChat = false;
     this.ownedWeapons = params.ownedWeapons;
     this.equippedWeapon = params.equippedWeapon;
     this.weaponSkinId = params.weaponSkinId;
@@ -454,22 +523,23 @@ export class HorrorGameEngine {
 
     this.loadMap(params.mapId);
 
-    // Initialize magazines
     for (const wid of WEAPON_ORDER) {
       const def = getWeaponStatsAtLevel(wid, this.ownedWeapons[wid]?.upgradeLevel || 1);
       this.ammoMap[wid] = def.magSize;
     }
 
-    // Place local player & build remote teammates
     const mapDef = MAPS[params.mapId];
+    const isDuel = Boolean(GAME_MODES[this.gameMode]?.noMonsters);
+    const spawnList = isDuel ? mapDef.duelSpawns : mapDef.playerSpawns;
+
     params.players.forEach((p, idx) => {
       if (p.playerId === this.localPlayerId) {
-        const sp = mapDef.playerSpawns[idx % mapDef.playerSpawns.length];
-        this.playerPos.set(sp[0], 0, sp[1]);
+        const sp = spawnList[idx % spawnList.length];
+        this.playerPos.set(p.x ?? sp[0], 0, p.z ?? sp[1]);
         this.playerVelY = 0;
-        this.yaw = 0;
+        this.yaw = p.yaw ?? 0;
         this.pitch = 0;
-        this.camera.rotation.set(0, 0, 0, 'YXZ');
+        this.camera.rotation.set(0, this.yaw, 0, 'YXZ');
         this.localHp = 100;
         this.localMaxHp = 100;
         this.localAlive = true;
@@ -482,15 +552,72 @@ export class HorrorGameEngine {
       }
     });
 
+    if (this.localPlayerModel) {
+      this.scene.remove(this.localPlayerModel.group);
+    }
+    this.localPlayerModel = buildPlayerCharacterModel(
+      { ...this.localLoadout, weapon_skin: this.weaponSkinId },
+      this.equippedWeapon,
+      this.textures.contactShadow
+    );
+    this.localPlayerModel.group.visible = this.cameraView !== '1st';
+    this.scene.add(this.localPlayerModel.group);
+
     this.mode = 'playing';
     this.paused = false;
     this.reloading = false;
     this.medkitAnimTimer = 0;
     this.medkitGroup.visible = false;
-    this.viewModelAnchor.visible = true;
+    this.viewModelAnchor.visible = this.cameraView === '1st';
     this.flashlightOn = true;
     this.flashlight.intensity = 16;
     this.rebuildViewWeapon();
+  }
+
+  public cycleCameraView(): CameraViewMode {
+    const order: CameraViewMode[] = ['1st', '2nd', '3rd'];
+    const next = order[(order.indexOf(this.cameraView) + 1) % order.length];
+    this.cameraView = next;
+    this.viewModelAnchor.visible = next === '1st';
+    if (this.localPlayerModel) {
+      this.localPlayerModel.group.visible = next !== '1st' && this.localAlive;
+    }
+    this.laserLine.visible = next === '2nd' && this.localAlive;
+    audioEngine.playUiClick();
+    return next;
+  }
+
+  public setTypingChat(typing: boolean) {
+    this.typingChat = typing;
+    if (typing) {
+      this.heldKeys.clear();
+      this.mouseDown = false;
+      this.mobileShooting = false;
+      this.aiming = false;
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
+  }
+
+  public handleRoundTeleport(x: number, z: number, yaw: number) {
+    this.playerPos.set(x, 0, z);
+    this.playerVelY = 0;
+    this.grounded = true;
+    this.yaw = yaw;
+    this.pitch = 0;
+    this.localHp = 100;
+    this.localAlive = true;
+  }
+
+  public handleExplosionFx(payload: { kind: string; x: number; y: number; z: number; radius: number; color: string }) {
+    if (payload.kind !== 'slam') {
+      audioEngine.playExplosion(payload.kind);
+    }
+    const hex = parseInt(payload.color.replace('#', ''), 16) || 0xf97316;
+    this.spawnBurst(payload.x, Math.max(0.4, payload.y), payload.z, hex, 22);
+    const dist = Math.hypot(this.playerPos.x - payload.x, this.playerPos.z - payload.z);
+    if (dist < payload.radius * 2.5) {
+      this.shakeIntensity = Math.max(this.shakeIntensity, Math.min(0.45, 0.45 * (1 - dist / (payload.radius * 2.5))));
+    }
   }
 
   public playMedkitAnimation() {
@@ -520,6 +647,13 @@ export class HorrorGameEngine {
     this.viewWeapon = buildWeaponModel(this.equippedWeapon, this.weaponSkinId, this.textures.muzzleFlash);
     this.viewWeapon.group.position.set(0.24, -0.22, -0.45);
     this.viewModelAnchor.add(this.viewWeapon.group);
+
+    if (this.localPlayerModel) {
+      this.localPlayerModel.weaponMount.clear();
+      const thirdWep = buildWeaponModel(this.equippedWeapon, this.weaponSkinId);
+      thirdWep.group.scale.setScalar(0.85);
+      this.localPlayerModel.weaponMount.add(thirdWep.group);
+    }
   }
 
   public switchWeapon(weaponId: WeaponId) {
@@ -543,6 +677,7 @@ export class HorrorGameEngine {
     if (this.reloading || !this.localAlive) return;
     const lvl = this.ownedWeapons[this.equippedWeapon]?.upgradeLevel || 1;
     const stats = getWeaponStatsAtLevel(this.equippedWeapon, lvl);
+    if (stats.isMelee) return;
     if ((this.ammoMap[this.equippedWeapon] ?? stats.magSize) >= stats.magSize) return;
     this.reloading = true;
     this.reloadDuration = stats.reloadTime;
@@ -566,7 +701,7 @@ export class HorrorGameEngine {
   }
 
   public requestPointerLock() {
-    if (this.mode === 'playing' && !this.paused && this.renderer.domElement.requestPointerLock) {
+    if (this.mode === 'playing' && !this.paused && !this.typingChat && this.renderer.domElement.requestPointerLock) {
       this.renderer.domElement.requestPointerLock();
     }
   }
@@ -606,6 +741,7 @@ export class HorrorGameEngine {
     this.waveState = state.waveState;
     this.matchElapsedSec = state.elapsedSec;
     this.monstersRemaining = state.monsters.length + state.remainingToSpawn;
+    this.duelState = state.duel;
     if (state.pausedBy) this.pausedBy = state.pausedBy;
     if (state.gameMode) this.gameMode = state.gameMode;
 
@@ -710,6 +846,56 @@ export class HorrorGameEngine {
         this.coins.delete(cid);
       }
     }
+
+    // Projectiles sync (Grenades, Molotovs, RPGs, Acid bolts)
+    const activeProjs = new Set<string>();
+    for (const pr of state.projectiles || []) {
+      activeProjs.add(pr.id);
+      let entry = this.projectiles.get(pr.id);
+      if (!entry) {
+        const mesh = buildProjectileMesh(pr.kind);
+        mesh.position.set(pr.x, pr.y, pr.z);
+        this.scene.add(mesh);
+        entry = { kind: pr.kind, mesh };
+        this.projectiles.set(pr.id, entry);
+      } else {
+        entry.mesh.position.set(pr.x, pr.y, pr.z);
+        entry.mesh.rotation.x += 0.25;
+        entry.mesh.rotation.y += 0.2;
+      }
+    }
+    for (const [pid, pr] of this.projectiles.entries()) {
+      if (!activeProjs.has(pid)) {
+        this.scene.remove(pr.mesh);
+        this.projectiles.delete(pid);
+      }
+    }
+
+    // Fire & Shock Ground Zones sync
+    const activeZones = new Set<string>();
+    for (const fz of state.fireZones || []) {
+      activeZones.add(fz.id);
+      if (!this.fireZones.has(fz.id)) {
+        const geo = new THREE.CylinderGeometry(fz.radius, fz.radius, 0.08, 24);
+        const mat = new THREE.MeshBasicMaterial({
+          color: fz.color || '#f97316',
+          transparent: true,
+          opacity: 0.42,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(fz.x, 0.06, fz.z);
+        this.scene.add(mesh);
+        this.fireZones.set(fz.id, { mesh, radius: fz.radius });
+      }
+    }
+    for (const [zid, zEntry] of this.fireZones.entries()) {
+      if (!activeZones.has(zid)) {
+        this.scene.remove(zEntry.mesh);
+        zEntry.mesh.geometry.dispose();
+        (zEntry.mesh.material as THREE.Material).dispose();
+        this.fireZones.delete(zid);
+      }
+    }
   }
 
   public handleHitConfirm(hits: Array<{ monsterId: string; damage: number; killed: boolean; x: number; z: number }>) {
@@ -782,27 +968,52 @@ export class HorrorGameEngine {
 
     const lvl = this.ownedWeapons[this.equippedWeapon]?.upgradeLevel || 1;
     const stats = getWeaponStatsAtLevel(this.equippedWeapon, lvl);
-    const currentAmmo = this.ammoMap[this.equippedWeapon] ?? stats.magSize;
-    if (currentAmmo <= 0) {
-      this.triggerReload();
-      return;
+
+    if (!stats.isMelee) {
+      const currentAmmo = this.ammoMap[this.equippedWeapon] ?? stats.magSize;
+      if (currentAmmo <= 0) {
+        this.triggerReload();
+        return;
+      }
+      this.ammoMap[this.equippedWeapon] = currentAmmo - 1;
     }
 
     const modeRateMult = GAME_MODES[this.gameMode]?.fireRateMult || 1.0;
-    this.ammoMap[this.equippedWeapon] = currentAmmo - 1;
     this.fireCooldown = 1 / (stats.fireRate * modeRateMult);
     this.recoilOffset = Math.min(0.16, this.recoilOffset + stats.recoil);
-    this.pitch = Math.min(1.35, this.pitch + stats.recoil * 0.28);
-    this.shakeIntensity = Math.min(0.22, this.shakeIntensity + stats.recoil * 0.9);
-    this.muzzleFlashTimer = 0.055;
-    this.muzzleLight.intensity = 10;
+    this.pitch = Math.min(1.35, this.pitch + stats.recoil * 0.25);
+    this.shakeIntensity = Math.min(0.22, this.shakeIntensity + stats.recoil * 0.85);
+
+    if (stats.isMelee) {
+      this.meleeSwingTimer = 0.24;
+    } else if (!stats.isThrowable) {
+      this.muzzleFlashTimer = 0.055;
+      this.muzzleLight.intensity = 10;
+    }
     audioEngine.playGunshot(this.equippedWeapon);
 
-    // Compute camera ray + pellet spread rays
+    // Cast from player eye position so 1st, 2nd, and 3rd person aim stays accurate
     _euler.set(this.pitch, this.yaw, 0, 'YXZ');
-    const ox = this.camera.position.x;
-    const oy = this.camera.position.y;
-    const oz = this.camera.position.z;
+    const ox = this.playerPos.x;
+    const oy = this.playerPos.y + 1.56;
+    const oz = this.playerPos.z;
+
+    if (stats.isThrowable || stats.isRocket) {
+      _dir.set(0, 0, -1).applyEuler(_euler);
+      this.callbacks.onThrow({
+        weaponId: this.equippedWeapon,
+        ox,
+        oy,
+        oz,
+        dx: _dir.x,
+        dy: _dir.y,
+        dz: _dir.z,
+      });
+      if ((this.ammoMap[this.equippedWeapon] ?? 0) <= 0) {
+        this.triggerReload();
+      }
+      return;
+    }
 
     const rays: Array<{ dx: number; dy: number; dz: number }> = [];
     for (let i = 0; i < stats.pellets; i++) {
@@ -816,16 +1027,31 @@ export class HorrorGameEngine {
       rays.push({ dx: _dir.x, dy: _dir.y, dz: _dir.z });
     }
 
-    const tracerStart = _v1.set(0.22, -0.14, -0.75).applyEuler(_euler).add(this.camera.position);
-    this.spawnTracer(
-      tracerStart.x,
-      tracerStart.y,
-      tracerStart.z,
-      rays[0].dx,
-      rays[0].dy,
-      rays[0].dz,
-      this.equippedWeapon === 'plasma' ? 0xef4444 : 0xfde047
-    );
+    if (stats.isFlamethrower) {
+      this.spawnBurst(
+        ox + rays[0].dx * 2.1,
+        oy - 0.1 + rays[0].dy * 2.1,
+        oz + rays[0].dz * 2.1,
+        0xfb923c,
+        8
+      );
+    } else if (!stats.isMelee) {
+      const tracerStart =
+        this.cameraView === '1st'
+          ? _v1.set(0.22, -0.14, -0.75).applyEuler(_euler).add(this.camera.position)
+          : _v1.set(ox + rays[0].dx * 0.65, oy - 0.12, oz + rays[0].dz * 0.65);
+      this.spawnTracer(
+        tracerStart.x,
+        tracerStart.y,
+        tracerStart.z,
+        rays[0].dx,
+        rays[0].dy,
+        rays[0].dz,
+        this.equippedWeapon === 'plasma' || this.equippedWeapon === 'plasma_cannon'
+          ? 0x38bdf8
+          : 0xfde047
+      );
+    }
 
     this.callbacks.onShoot({
       weaponId: this.equippedWeapon,
@@ -838,7 +1064,7 @@ export class HorrorGameEngine {
       rays,
     });
 
-    if (this.ammoMap[this.equippedWeapon] <= 0) {
+    if (!stats.isMelee && (this.ammoMap[this.equippedWeapon] ?? 0) <= 0) {
       this.triggerReload();
     }
   }
@@ -855,9 +1081,18 @@ export class HorrorGameEngine {
     this.monsters.clear();
     for (const c of this.coins.values()) this.scene.remove(c.mesh);
     this.coins.clear();
+    for (const pr of this.projectiles.values()) this.scene.remove(pr.mesh);
+    this.projectiles.clear();
+    for (const fz of this.fireZones.values()) {
+      this.scene.remove(fz.mesh);
+      fz.mesh.geometry.dispose();
+      (fz.mesh.material as THREE.Material).dispose();
+    }
+    this.fireZones.clear();
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
+    if (this.typingChat) return;
     this.heldKeys.add(e.code);
     if (this.mode !== 'playing') return;
 
@@ -869,13 +1104,16 @@ export class HorrorGameEngine {
 
     if (e.code === 'KeyR') this.triggerReload();
     if (e.code === 'KeyF') this.toggleFlashlight();
+    if (e.code === 'KeyC') this.cycleCameraView();
+    if (e.code === 'KeyQ') this.cycleWeapon(1);
     if (e.code === 'KeyH' || e.code === 'KeyB') this.callbacks.onBuyHealthRequest();
     if (e.code === 'Space') this.triggerJump();
 
     if (e.code.startsWith('Digit')) {
       const num = parseInt(e.code.replace('Digit', ''), 10);
-      if (num >= 1 && num <= WEAPON_ORDER.length) {
-        this.switchWeapon(WEAPON_ORDER[num - 1]);
+      const unlocked = WEAPON_ORDER.filter((w) => Boolean(this.ownedWeapons[w]));
+      if (num >= 1 && num <= unlocked.length) {
+        this.switchWeapon(unlocked[num - 1]);
       }
     }
   };
@@ -892,7 +1130,7 @@ export class HorrorGameEngine {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (this.mode !== 'playing' || this.paused) return;
+    if (this.mode !== 'playing' || this.paused || this.typingChat) return;
     audioEngine.unlock();
     if (e.button === 0) {
       if (document.pointerLockElement !== this.renderer.domElement) {
@@ -1018,9 +1256,10 @@ export class HorrorGameEngine {
   };
 
   private updateGameplay(dt: number, now: number) {
-    // 1. Movement
     const lvl = this.ownedWeapons[this.equippedWeapon]?.upgradeLevel || 1;
     const wStats = getWeaponStatsAtLevel(this.equippedWeapon, lvl);
+    const mapDef = MAPS[this.currentMapId];
+    let isMoving = false;
 
     if (this.localAlive && this.pausedBy.length === 0) {
       const forward = (this.heldKeys.has('KeyW') ? 1 : 0) - (this.heldKeys.has('KeyS') ? 1 : 0) - this.mobileMove.y;
@@ -1031,6 +1270,7 @@ export class HorrorGameEngine {
       const speed = 7.6 * wStats.moveSpeedMult * modeSpeedMult * (sprinting && !this.aiming ? 1.32 : this.aiming ? 0.68 : 1.0);
       const len = Math.hypot(forward, strafe);
       if (len > 0.05) {
+        isMoving = true;
         const nf = forward / Math.max(1, len);
         const ns = strafe / Math.max(1, len);
         const sinY = Math.sin(this.yaw);
@@ -1050,7 +1290,6 @@ export class HorrorGameEngine {
         }
       }
 
-      // Gravity & Jump
       if (!this.grounded || this.playerPos.y > 0) {
         this.playerVelY -= 19.5 * dt;
         this.playerPos.y += this.playerVelY * dt;
@@ -1062,8 +1301,8 @@ export class HorrorGameEngine {
       }
     }
 
-    // 2. Camera FOV (ADS zoom), Shake & Zero-Roll Orientation
-    const targetFov = this.aiming ? (this.equippedWeapon === 'sniper' ? 38 : 54) : 72;
+    // 2. Camera FOV, Shake, and 1st / 2nd / 3rd Person Camera Positioning
+    const targetFov = this.aiming ? (wStats.weaponClass === 'sniper' ? 38 : 54) : 72;
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 14, dt);
       this.camera.updateProjectionMatrix();
@@ -1073,8 +1312,92 @@ export class HorrorGameEngine {
     const sx = (Math.random() - 0.5) * this.shakeIntensity * 0.25;
     const sy = (Math.random() - 0.5) * this.shakeIntensity * 0.25;
 
-    this.camera.position.set(this.playerPos.x + sx, this.playerPos.y + 1.66 + sy, this.playerPos.z);
-    this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
+    if (this.localPlayerModel) {
+      this.localPlayerModel.group.visible = this.cameraView !== '1st' && this.localAlive;
+      this.localPlayerModel.group.position.copy(this.playerPos);
+      this.localPlayerModel.group.rotation.y = this.yaw + Math.PI;
+      if (isMoving) {
+        this.localWalkPhase += dt * 11;
+        this.localPlayerModel.leftLeg.rotation.x = Math.sin(this.localWalkPhase) * 0.55;
+        this.localPlayerModel.rightLeg.rotation.x = -Math.sin(this.localWalkPhase) * 0.55;
+      } else {
+        this.localPlayerModel.leftLeg.rotation.x = THREE.MathUtils.damp(this.localPlayerModel.leftLeg.rotation.x, 0, 10, dt);
+        this.localPlayerModel.rightLeg.rotation.x = THREE.MathUtils.damp(this.localPlayerModel.rightLeg.rotation.x, 0, 10, dt);
+      }
+    }
+
+    if (this.cameraView === '1st') {
+      this.laserLine.visible = false;
+      this.camera.position.set(this.playerPos.x + sx, this.playerPos.y + 1.66 + sy, this.playerPos.z);
+      this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
+    } else {
+      _euler.set(this.pitch, this.yaw, 0, 'YXZ');
+      const forwardDir = _v1.set(0, 0, -1).applyEuler(_euler).normalize();
+      const rightDir = _v2.set(1, 0, 0).applyEuler(_euler).normalize();
+      const anchorX = this.playerPos.x;
+      const anchorY = this.playerPos.y + 1.56;
+      const anchorZ = this.playerPos.z;
+
+      let desiredX: number;
+      let desiredY: number;
+      let desiredZ: number;
+      let lookX: number;
+      let lookY: number;
+      let lookZ: number;
+
+      if (this.cameraView === '3rd') {
+        // Over-the-right-shoulder 3rd person chase camera
+        desiredX = anchorX - forwardDir.x * 3.45 + rightDir.x * 0.62;
+        desiredY = anchorY - forwardDir.y * 2.2 + 0.55;
+        desiredZ = anchorZ - forwardDir.z * 3.45 + rightDir.z * 0.62;
+        lookX = anchorX + forwardDir.x * 16;
+        lookY = anchorY + forwardDir.y * 16;
+        lookZ = anchorZ + forwardDir.z * 16;
+      } else {
+        // 2nd person: angled front-right cinematic perspective looking across operative & downrange
+        desiredX = anchorX + forwardDir.x * 1.95 + rightDir.x * 1.38;
+        desiredY = anchorY + 0.52;
+        desiredZ = anchorZ + forwardDir.z * 1.95 + rightDir.z * 1.38;
+        lookX = anchorX - forwardDir.x * 1.2;
+        lookY = anchorY - 0.15;
+        lookZ = anchorZ - forwardDir.z * 1.2;
+      }
+
+      // Clamp camera against walls/obstacles so walls never obstruct the view
+      const camVecX = desiredX - anchorX;
+      const camVecY = desiredY - anchorY;
+      const camVecZ = desiredZ - anchorZ;
+      const camDist = Math.hypot(camVecX, camVecY, camVecZ) || 0.01;
+      const hitWall = segmentHitsObstacleDist(
+        anchorX,
+        anchorY,
+        anchorZ,
+        camVecX / camDist,
+        camVecY / camDist,
+        camVecZ / camDist,
+        camDist,
+        mapDef
+      );
+      const safeT = hitWall !== null ? Math.max(0.25, (hitWall - 0.35) / camDist) : 1.0;
+
+      this.camera.position.set(
+        anchorX + camVecX * safeT + sx,
+        Math.max(0.55, anchorY + camVecY * safeT + sy),
+        anchorZ + camVecZ * safeT
+      );
+      this.camera.lookAt(lookX, lookY, lookZ);
+
+      // Update tactical laser sight in 2nd person
+      this.laserLine.visible = this.cameraView === '2nd' && this.localAlive;
+      if (this.laserLine.visible) {
+        const lWall = segmentHitsObstacleDist(anchorX, anchorY, anchorZ, forwardDir.x, forwardDir.y, forwardDir.z, 26, mapDef);
+        const lLen = lWall !== null ? lWall : 26;
+        const posAttr = this.laserLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+        posAttr.setXYZ(0, anchorX, anchorY - 0.15, anchorZ);
+        posAttr.setXYZ(1, anchorX + forwardDir.x * lLen, anchorY + forwardDir.y * lLen, anchorZ + forwardDir.z * lLen);
+        posAttr.needsUpdate = true;
+      }
+    }
 
     // 3. Shooting (hold to spam all guns) & Reloading
     if (this.fireCooldown > 0) this.fireCooldown -= dt;
@@ -1090,7 +1413,7 @@ export class HorrorGameEngine {
       }
     }
 
-    // Viewmodel recoil, reload & medkit syringe animation
+    // Viewmodel recoil, melee slash, reload & medkit syringe animation
     if (this.medkitAnimTimer > 0) {
       this.medkitAnimTimer = Math.max(0, this.medkitAnimTimer - dt);
       const p = 1 - this.medkitAnimTimer / 0.85;
@@ -1101,16 +1424,22 @@ export class HorrorGameEngine {
       if (this.medkitAnimTimer <= 0) this.medkitGroup.visible = false;
     }
 
+    if (this.meleeSwingTimer > 0) {
+      this.meleeSwingTimer = Math.max(0, this.meleeSwingTimer - dt);
+    }
+
     this.recoilOffset = THREE.MathUtils.damp(this.recoilOffset, 0, 16, dt);
     if (this.viewWeapon) {
       const dipForMedkit = this.medkitAnimTimer > 0 ? -0.18 : 0;
-      const targetX = this.aiming ? 0.06 : 0.24;
-      const targetY = (this.reloading ? -0.38 : this.aiming ? -0.17 : -0.22) + dipForMedkit;
-      const targetZ = -0.45 + this.recoilOffset;
-      this.viewWeapon.group.position.x = THREE.MathUtils.damp(this.viewWeapon.group.position.x, targetX, 16, dt);
-      this.viewWeapon.group.position.y = THREE.MathUtils.damp(this.viewWeapon.group.position.y, targetY, 14, dt);
-      this.viewWeapon.group.position.z = THREE.MathUtils.damp(this.viewWeapon.group.position.z, targetZ, 22, dt);
-      this.viewWeapon.group.rotation.x = this.reloading ? -0.45 : this.recoilOffset * 1.4;
+      const swingP = this.meleeSwingTimer > 0 ? Math.sin((1 - this.meleeSwingTimer / 0.24) * Math.PI) : 0;
+      const targetX = (this.aiming ? 0.06 : 0.24) - swingP * 0.34;
+      const targetY = (this.reloading ? -0.38 : this.aiming ? -0.17 : -0.22) + dipForMedkit + swingP * 0.06;
+      const targetZ = -0.45 + this.recoilOffset - swingP * 0.26;
+      this.viewWeapon.group.position.x = THREE.MathUtils.damp(this.viewWeapon.group.position.x, targetX, 18, dt);
+      this.viewWeapon.group.position.y = THREE.MathUtils.damp(this.viewWeapon.group.position.y, targetY, 16, dt);
+      this.viewWeapon.group.position.z = THREE.MathUtils.damp(this.viewWeapon.group.position.z, targetZ, 24, dt);
+      this.viewWeapon.group.rotation.x = this.reloading ? -0.45 : this.recoilOffset * 1.4 - swingP * 0.9;
+      this.viewWeapon.group.rotation.z = swingP * 0.75;
 
       if (this.muzzleFlashTimer > 0) {
         this.muzzleFlashTimer -= dt;
@@ -1122,7 +1451,7 @@ export class HorrorGameEngine {
       }
     }
 
-    // 4. Remote Teammates Interpolation & Animation
+    // 4. Remote Teammates / Opponent Interpolation & Animation
     for (const rp of this.remotePlayers.values()) {
       rp.model.group.visible = rp.data.alive;
       if (!rp.data.alive) continue;
@@ -1157,7 +1486,6 @@ export class HorrorGameEngine {
         m.model.rightArm.rotation.x = m.attacking ? -0.9 : -armSwing;
       }
 
-      // Hit flash feedback
       const flashing = now < m.hitFlashUntil;
       for (const part of m.model.bodyParts) {
         const mat = part.material as THREE.MeshStandardMaterial;
@@ -1185,17 +1513,20 @@ export class HorrorGameEngine {
         }
       }
 
-      // Billboard HP bar to camera
       m.model.hpBarGroup.lookAt(this.camera.position);
     }
 
-    // 6. Spin Coins
+    // 6. Spin Coins & Pulse Fire Zones
     for (const c of this.coins.values()) {
       c.mesh.rotation.z += dt * 3.2;
       c.mesh.position.y = 0.55 + Math.sin(this.elapsed * 4 + c.x) * 0.1;
     }
+    for (const fz of this.fireZones.values()) {
+      const s = 0.94 + Math.sin(this.elapsed * 12) * 0.06;
+      fz.mesh.scale.set(s, 1, s);
+    }
 
-    // 7. Update Pooled Particles & Pooled Tracers (Zero GC)
+    // 7. Update Pooled Particles & Pooled Tracers
     for (const p of this.particlePool) {
       if (p.life > 0) {
         p.life -= dt;
@@ -1233,21 +1564,24 @@ export class HorrorGameEngine {
     if (now - this.lastHudEmit >= 65) {
       this.lastHudEmit = now;
       const firstMate = this.remotePlayers.values().next().value;
-      const mapDef = MAPS[this.currentMapId];
+      const isDuel = Boolean(GAME_MODES[this.gameMode]?.noMonsters);
       this.callbacks.onHudUpdate({
         hp: this.localHp,
         maxHp: this.localMaxHp,
         alive: this.localAlive,
-        ammo: this.ammoMap[this.equippedWeapon] ?? wStats.magSize,
-        maxAmmo: wStats.magSize,
+        ammo: wStats.isMelee ? 1 : this.ammoMap[this.equippedWeapon] ?? wStats.magSize,
+        maxAmmo: wStats.isMelee ? 1 : wStats.magSize,
         reloading: this.reloading,
         reloadProgress: this.reloading ? 1 - Math.max(0, this.reloadTimer / this.reloadDuration) : 1,
         weaponId: this.equippedWeapon,
         weaponName: wStats.name,
+        weaponClass: wStats.weaponClass,
+        isMelee: Boolean(wStats.isMelee),
         kills: this.localKills,
         score: this.localScore,
         coinsEarned: this.localCoinsEarned,
         healthPurchasesUsed: this.localHealthPurchasesUsed,
+        medkitCost: getHealthPurchaseCost(this.localHealthPurchasesUsed),
         wave: this.wave,
         maxWaves: this.maxWaves,
         waveState: this.waveState,
@@ -1255,11 +1589,14 @@ export class HorrorGameEngine {
         monstersRemaining: this.monstersRemaining,
         flashlightOn: this.flashlightOn,
         pointerLocked: document.pointerLockElement === this.renderer.domElement,
+        cameraView: this.cameraView,
         gameMode: this.gameMode,
         pausedBy: this.pausedBy,
         boss: this.activeBoss,
+        duel: this.duelState,
         teammate: firstMate
           ? {
+              playerId: firstMate.data.playerId,
               username: firstMate.data.username,
               hp: firstMate.data.hp,
               maxHp: firstMate.data.maxHp,
@@ -1279,6 +1616,14 @@ export class HorrorGameEngine {
             isBoss: m.type === 'boss',
           })),
           coins: Array.from(this.coins.values()).map((c) => ({ x: c.x, z: c.z })),
+          opponent:
+            isDuel && firstMate
+              ? {
+                  x: firstMate.model.group.position.x,
+                  z: firstMate.model.group.position.z,
+                  alive: firstMate.data.alive,
+                }
+              : null,
         },
       });
     }

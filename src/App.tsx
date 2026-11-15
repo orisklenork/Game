@@ -8,6 +8,7 @@ import {
   Settings,
   ShoppingBag,
   Sparkles,
+  Swords,
   Trophy,
   User,
   UserCheck,
@@ -17,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { AuthOverlay } from './components/AuthOverlay';
-import { GameHud } from './components/GameHud';
+import { ChatMessageItem, GameHud } from './components/GameHud';
 import { LobbyModal } from './components/LobbyModal';
 import { GameSettings, SettingsModal } from './components/SettingsModal';
 import { ShopAndCustomize } from './components/ShopAndCustomize';
@@ -76,10 +77,13 @@ const DEFAULT_HUD: HudSnapshot = {
   reloadProgress: 1,
   weaponId: 'pistol',
   weaponName: 'M9 Tactical',
+  weaponClass: 'handgun',
+  isMelee: false,
   kills: 0,
   score: 0,
   coinsEarned: 0,
   healthPurchasesUsed: 0,
+  medkitCost: 80,
   wave: 1,
   maxWaves: 0,
   waveState: 'intermission',
@@ -87,6 +91,7 @@ const DEFAULT_HUD: HudSnapshot = {
   monstersRemaining: 0,
   flashlightOn: true,
   pointerLocked: false,
+  cameraView: '1st',
   gameMode: 'unlimited',
   pausedBy: [],
   boss: null,
@@ -98,6 +103,7 @@ const DEFAULT_HUD: HudSnapshot = {
     playerYaw: 0,
     monsters: [],
     coins: [],
+    opponent: null,
   },
 };
 
@@ -116,11 +122,12 @@ function pickLocalVoteCandidates(preferredMap: MapId): {
 } {
   const allMaps = Object.keys(MAPS) as MapId[];
   const others = allMaps.filter((m) => m !== preferredMap).sort(() => Math.random() - 0.5);
-  const mapCandidates = [preferredMap, ...others.slice(0, 2)].sort(() => Math.random() - 0.5);
+  const mapCandidates = [preferredMap, ...others.slice(0, 3)].sort(() => Math.random() - 0.5);
 
   const allModes = (Object.keys(GAME_MODES) as GameModeId[]).sort(() => Math.random() - 0.5);
-  const modeCandidates = allModes.slice(0, 3);
+  const modeCandidates = allModes.slice(0, 4);
   if (!modeCandidates.includes('unlimited')) modeCandidates[0] = 'unlimited';
+  if (!modeCandidates.includes('duel_1v1')) modeCandidates[modeCandidates.length - 1] = 'duel_1v1';
   return { mapCandidates, modeCandidates };
 }
 
@@ -159,6 +166,7 @@ export default function App() {
   const [waveBanner, setWaveBanner] = useState<string | null>(null);
   const [damageFlash, setDamageFlash] = useState(false);
   const [healPulse, setHealPulse] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessageItem[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [matchResult, setMatchResult] = useState<MatchResultData | null>(null);
 
@@ -193,6 +201,8 @@ export default function App() {
     if (runner) {
       if (type === 'player:state') runner.updatePlayerState(payload);
       else if (type === 'player:shoot') runner.handleShoot(payload);
+      else if (type === 'player:throw') runner.handleThrow(payload);
+      else if (type === 'match:chat') runner.sendChat(String(payload.text || ''));
       else if (type === 'player:buy_health') runner.buyHealth();
       else if (type === 'player:pause') runner.setPaused(Boolean(payload.paused));
       else if (type === 'match:abort') {
@@ -227,6 +237,7 @@ export default function App() {
     const engine = new HorrorGameEngine(mount, {
       onHudUpdate: (nextHud) => setHud(nextHud),
       onShoot: (payload) => sendWs('player:shoot', payload),
+      onThrow: (payload) => sendWs('player:throw', payload),
       onPlayerStateSend: (payload) => sendWs('player:state', payload),
       onPauseRequest: () => {
         setMatchPaused(!pausedRef.current);
@@ -365,11 +376,16 @@ export default function App() {
             audioEngine.startAmbientMusic();
             setVoteState(null);
             setMatchResult(null);
+            setChatMessages([]);
             pausedRef.current = false;
             setPaused(false);
             setActiveModal(null);
             setScreen('playing');
-            setWaveBanner(`WAVE 1 · ${GAME_MODES[(payload.gameMode as GameModeId) || 'unlimited']?.name.toUpperCase()}`);
+            setWaveBanner(
+              payload.gameMode === 'duel_1v1'
+                ? '1V1 ARENA DUEL · ROUND 1'
+                : `WAVE 1 · ${GAME_MODES[(payload.gameMode as GameModeId) || 'unlimited']?.name.toUpperCase()}`
+            );
             window.setTimeout(() => setWaveBanner(null), 2400);
 
             setProfile((curr) => {
@@ -382,6 +398,7 @@ export default function App() {
                 equippedWeapon: curr.equippedWeapon,
                 ownedWeapons: curr.weapons,
                 weaponSkinId: skinId,
+                localLoadout: curr.equippedLoadout,
                 players: payload.players,
               });
               return curr;
@@ -414,6 +431,38 @@ export default function App() {
             engineRef.current?.handleRemoteShotFx(payload);
             break;
 
+          case 'match:explosion':
+            engineRef.current?.handleExplosionFx(payload);
+            break;
+
+          case 'match:round_ended':
+            setWaveBanner(
+              `ROUND ${payload.round} · ${
+                payload.winnerName ? `${String(payload.winnerName).toUpperCase()} WINS` : 'DRAW'
+              }`
+            );
+            window.setTimeout(() => setWaveBanner(null), 2400);
+            break;
+
+          case 'match:round_started':
+            setProfile((curr) => {
+              if (curr && Array.isArray(payload.spawns)) {
+                const sp = payload.spawns.find((s: any) => s.playerId === curr.id);
+                if (sp) {
+                  engineRef.current?.handleRoundTeleport(sp.x, sp.z, sp.yaw);
+                }
+              }
+              return curr;
+            });
+            setWaveBanner(`ROUND ${payload.round} · FIGHT!`);
+            window.setTimeout(() => setWaveBanner(null), 2000);
+            break;
+
+          case 'match:chat':
+            audioEngine.playChatPing();
+            setChatMessages((prev) => [...prev.slice(-29), payload as ChatMessageItem]);
+            break;
+
           case 'match:player_hit':
             setProfile((curr) => {
               if (curr && payload.playerId === curr.id) {
@@ -440,7 +489,7 @@ export default function App() {
             setHealPulse(true);
             window.setTimeout(() => setHealPulse(false), 1100);
             setProfile((curr) => (curr ? { ...curr, coins: payload.newCoinBalance } : curr));
-            showToast(`Medkit applied (${payload.remainingPurchases} left)`);
+            showToast(`Medkit applied (+55 HP) · Next: ${payload.nextCost}c`);
             break;
 
           case 'match:health_error':
@@ -497,11 +546,16 @@ export default function App() {
             audioEngine.startAmbientMusic();
             setVoteState(null);
             setMatchResult(null);
+            setChatMessages([]);
             pausedRef.current = false;
             setPaused(false);
             setActiveModal(null);
             setScreen('playing');
-            setWaveBanner(`WAVE 1 · ${GAME_MODES[payload.gameMode]?.name.toUpperCase()}`);
+            setWaveBanner(
+              payload.gameMode === 'duel_1v1'
+                ? '1V1 ARENA DUEL · ROUND 1 VS SPECTRE-AI'
+                : `WAVE 1 · ${GAME_MODES[payload.gameMode]?.name.toUpperCase()}`
+            );
             window.setTimeout(() => setWaveBanner(null), 2400);
             const skinId = profile.equippedLoadout.weapon_skin || 'wskin_factory';
             engineRef.current?.startMatch({
@@ -511,6 +565,7 @@ export default function App() {
               equippedWeapon: profile.equippedWeapon,
               ownedWeapons: profile.weapons,
               weaponSkinId: skinId,
+              localLoadout: profile.equippedLoadout,
               players: payload.players,
             });
           },
@@ -536,9 +591,29 @@ export default function App() {
             setHealPulse(true);
             window.setTimeout(() => setHealPulse(false), 1100);
             setProfile((curr) => (curr ? { ...curr, coins: p.newCoinBalance } : curr));
-            showToast(`Medkit applied (${p.remainingPurchases} left)`);
+            showToast(`Medkit applied (+55 HP) · Next: ${p.nextCost}c`);
           },
           onHealthError: (p) => showToast(p.message),
+          onExplosion: (p) => engineRef.current?.handleExplosionFx(p),
+          onRemoteShotFx: (p) => engineRef.current?.handleRemoteShotFx(p),
+          onRoundEnded: (p) => {
+            setWaveBanner(
+              `ROUND ${p.round} · ${p.winnerName ? `${p.winnerName.toUpperCase()} WINS` : 'DRAW'}`
+            );
+            window.setTimeout(() => setWaveBanner(null), 2400);
+          },
+          onRoundStarted: (p) => {
+            const sp = p.spawns.find((s) => s.playerId === profile.id);
+            if (sp) {
+              engineRef.current?.handleRoundTeleport(sp.x, sp.z, sp.yaw);
+            }
+            setWaveBanner(`ROUND ${p.round} · FIGHT!`);
+            window.setTimeout(() => setWaveBanner(null), 2000);
+          },
+          onChat: (p) => {
+            audioEngine.playChatPing();
+            setChatMessages((prev) => [...prev.slice(-29), p]);
+          },
           onEnded: (p) => {
             localRunnerRef.current = null;
             audioEngine.setBossMusic(false);
@@ -569,6 +644,13 @@ export default function App() {
       const chosenMap = v.mapVotes[profile.id] || v.mapCandidates[0] || previewMap;
       const chosenMode = v.modeVotes[profile.id] || v.modeCandidates[0] || 'unlimited';
       setVoteState(null);
+
+      if (chosenMode === 'duel_1v1') {
+        setRoom(null);
+        setLocalRoomMode(false);
+        startLocalSoloMatch(chosenMap, 'duel_1v1');
+        return;
+      }
 
       if (!isStaticMode() && !wsFailedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
         sendWs('room:create', { mapId: chosenMap, gameMode: chosenMode, difficulty: 'normal', isPublic: false });
@@ -785,7 +867,7 @@ export default function App() {
                   </h1>
                 </div>
                 <p className="text-sm sm:text-base text-slate-300 max-w-xl leading-relaxed">
-                  Two-player cooperative survival horror. Vote on haunted zones &amp; endless survival modes, fight Spitters, Howlers, and Obsidian Stalkers, and defeat the Abomination Titan every 5 waves.
+                  Survive endless horror waves across 12 distinct arenas with 48 weapons, throwables &amp; skins, or enter 1v1 multi-round duels against players and Spectre-AI.
                 </p>
               </div>
 
@@ -797,6 +879,19 @@ export default function App() {
                 >
                   <Crosshair className="w-5 h-5" />
                   <span>Play Now</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    audioEngine.unlock();
+                    audioEngine.startAmbientMusic();
+                    audioEngine.playUiClick();
+                    startLocalSoloMatch(previewMap, 'duel_1v1');
+                  }}
+                  className="flex items-center gap-2 px-5 py-3.5 rounded-xl bg-sky-700/85 hover:bg-sky-600 border border-sky-400/50 text-white font-display font-bold text-sm transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Swords className="w-4 h-4" />
+                  <span>1v1 Duel (vs Bot)</span>
                 </button>
 
                 <button
@@ -893,9 +988,9 @@ export default function App() {
           {/* Flat Control Hint Footer */}
           <footer className="text-xs text-slate-500 flex flex-wrap items-center justify-between gap-2">
             <span>
-              WASD Move · Hold Fire to Spray · R Reload · 1–7 Weapons · H Medkit · F Flashlight · Esc Pause
+              WASD Move · Hold Fire · R Reload · Q Cycle Gun · C 1st/2nd/3rd View · T Chat · H Medkit · F Flashlight
             </span>
-            <span>Endless Waves · Boss Every 5 Waves · 2-Player Co-Op</span>
+            <span>12 Arenas · 48 Weapons · Co-Op &amp; 1v1 Duels</span>
           </footer>
         </div>
       )}
@@ -922,9 +1017,9 @@ export default function App() {
             }
             sendWs('room:begin_vote', {});
           }}
-          onChangeConfig={(mapId, difficulty) => {
+          onChangeConfig={(mapId, difficulty, gameMode) => {
             if (localRoomMode) {
-              const updated = updateLocalRoomConfig(room.id, mapId, difficulty);
+              const updated = updateLocalRoomConfig(room.id, mapId, difficulty, gameMode);
               if (updated) {
                 setRoom(updated);
                 setPreviewMap(updated.mapId);
@@ -932,7 +1027,7 @@ export default function App() {
               }
               return;
             }
-            sendWs('room:config', { mapId, difficulty });
+            sendWs('room:config', { mapId, difficulty, gameMode });
           }}
           onInviteFriend={(friendId) => {
             if (localRoomMode) {
@@ -1103,15 +1198,22 @@ export default function App() {
       {profile && screen === 'playing' && (
         <GameHud
           hud={hud}
+          localPlayerId={profile.id}
+          localUsername={profile.username}
           ownedWeapons={profile.weapons}
           hitMarker={hitMarker}
           waveBanner={waveBanner}
           damageFlash={damageFlash}
           healPulse={healPulse}
           mobileControls={mobileControlsEnabled}
+          chatMessages={chatMessages}
+          onSendChat={(text) => sendWs('match:chat', { text })}
+          onChatTypingChange={(typing) => engineRef.current?.setTypingChat(typing)}
           onPause={() => setMatchPaused(true)}
           onBuyHealth={() => sendWs('player:buy_health', {})}
           onSwitchWeapon={(wid: WeaponId) => engineRef.current?.switchWeapon(wid)}
+          onCycleWeapon={() => engineRef.current?.cycleWeapon(1)}
+          onCycleCameraView={() => engineRef.current?.cycleCameraView()}
           onReload={() => engineRef.current?.triggerReload()}
           onToggleFlashlight={() => engineRef.current?.toggleFlashlight()}
           onLockPointer={() => engineRef.current?.requestPointerLock()}

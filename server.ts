@@ -24,7 +24,21 @@ import {
 import { getOnlinePlayerIds, setupGameWebSocket } from './server/gameServer.ts';
 import type { WeaponId } from './src/shared/gameData.ts';
 
-const PORT = Number(process.env.PORT) || 3000;
+function resolvePort(): number {
+  const idx = process.argv.indexOf('--port');
+  if (idx !== -1 && process.argv[idx + 1]) {
+    const cliPort = Number(process.argv[idx + 1]);
+    if (Number.isFinite(cliPort) && cliPort > 0) return cliPort;
+  }
+  const envPort = Number(process.env.PORT);
+  // In container dev environments, nginx may set PORT=8080; keep Vite/Express dev server on 3000 unless production
+  if (process.env.NODE_ENV !== 'production' && envPort === 8080) {
+    return 3000;
+  }
+  return Number.isFinite(envPort) && envPort > 0 ? envPort : 3000;
+}
+
+const PORT = resolvePort();
 const MAX_REGISTRATIONS_PER_MIN = Math.max(1, Number(process.env.RATE_LIMIT_MAX_REGISTRATIONS) || 10);
 
 // Simple in-memory rate limiter for account creation & API protection
@@ -55,6 +69,13 @@ async function startServer() {
       return;
     }
     (req as any).player = profile;
+    next();
+  }
+
+  function optionalAuth(req: express.Request, _res: express.Response, next: express.NextFunction) {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    (req as any).player = token ? getProfileByToken(token) : null;
     next();
   }
 
@@ -216,10 +237,15 @@ async function startServer() {
   });
 
   // Leaderboard & Match History
-  app.get('/api/leaderboard', requireAuth, (req, res) => {
-    const player = (req as any).player;
-    const scope = req.query.scope === 'friends' ? 'friends' : 'global';
-    res.json({ entries: getLeaderboard(player.id, scope) });
+  app.get('/api/leaderboard', optionalAuth, (req, res) => {
+    try {
+      const player = (req as any).player;
+      const scope = req.query.scope === 'friends' ? 'friends' : 'global';
+      const sort = String(req.query.sort || 'kills');
+      res.json({ entries: getLeaderboard(player?.id || null, scope, sort) });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load leaderboard' });
+    }
   });
 
   app.get('/api/matches/history', requireAuth, (req, res) => {
@@ -250,4 +276,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start Nightfall server:', err);
+  process.exit(1);
+});

@@ -291,21 +291,83 @@ export function handleLocalApiFallback(path: string, options: RequestInit = {}):
     return { players: [] };
   }
 
-  if (path === '/api/leaderboard') {
-    return {
-      entries: [
-        {
-          id: profile.id,
-          username: profile.username,
-          player_code: profile.playerCode,
-          level: profile.level,
-          rank: profile.rank,
-          total_kills: profile.stats.totalKills,
-          highest_wave: profile.stats.highestWave,
-          matches_won: profile.stats.matchesWon,
-        },
-      ],
+  if (path.startsWith('/api/leaderboard')) {
+    const url = new URL(path, 'http://localhost');
+    const scope = url.searchParams.get('scope') === 'friends' ? 'friends' : 'global';
+    const sort = url.searchParams.get('sort') || 'kills';
+
+    const selfEntry = {
+      id: profile.id,
+      username: profile.username,
+      player_code: profile.playerCode,
+      level: profile.level,
+      xp: profile.xp,
+      rank: profile.rank,
+      coins: profile.coins,
+      total_kills: profile.stats.totalKills,
+      boss_kills: profile.stats.bossKills,
+      matches_played: profile.stats.matchesPlayed,
+      highest_wave: profile.stats.highestWave,
+      matches_won: profile.stats.matchesWon,
     };
+
+    const entries =
+      scope === 'friends'
+        ? [selfEntry]
+        : [
+            selfEntry,
+            {
+              id: 'bot-reaper-01',
+              username: 'Vanguard_Kael',
+              player_code: 'NF-409182',
+              level: 14,
+              xp: 3100,
+              rank: 'Stalker',
+              coins: 2450,
+              total_kills: 412,
+              boss_kills: 9,
+              matches_played: 18,
+              highest_wave: 16,
+              matches_won: 11,
+            },
+            {
+              id: 'bot-reaper-02',
+              username: 'Sable_09',
+              player_code: 'NF-782314',
+              level: 10,
+              xp: 1850,
+              rank: 'Vanguard',
+              coins: 1620,
+              total_kills: 268,
+              boss_kills: 5,
+              matches_played: 12,
+              highest_wave: 12,
+              matches_won: 7,
+            },
+            {
+              id: 'bot-reaper-03',
+              username: 'AshWarden',
+              player_code: 'NF-551903',
+              level: 7,
+              xp: 980,
+              rank: 'Operative',
+              coins: 940,
+              total_kills: 154,
+              boss_kills: 2,
+              matches_played: 8,
+              highest_wave: 9,
+              matches_won: 4,
+            },
+          ];
+
+    entries.sort((a, b) => {
+      if (sort === 'wave') return b.highest_wave - a.highest_wave || b.total_kills - a.total_kills;
+      if (sort === 'wins') return b.matches_won - a.matches_won || b.total_kills - a.total_kills;
+      if (sort === 'level') return b.level - a.level || b.xp - a.xp;
+      return b.total_kills - a.total_kills || b.xp - a.xp;
+    });
+
+    return { entries };
   }
 
   if (path === '/api/matches/history') {

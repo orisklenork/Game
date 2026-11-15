@@ -15,6 +15,15 @@ export interface ProceduralTextureSet {
   catacombsWall: THREE.CanvasTexture;
   subwayFloor: THREE.CanvasTexture;
   subwayWall: THREE.CanvasTexture;
+  asylumFloor: THREE.CanvasTexture;
+  asylumWall: THREE.CanvasTexture;
+  factoryFloor: THREE.CanvasTexture;
+  factoryWall: THREE.CanvasTexture;
+  graveyardFloor: THREE.CanvasTexture;
+  bunkerFloor: THREE.CanvasTexture;
+  bunkerWall: THREE.CanvasTexture;
+  rooftopFloor: THREE.CanvasTexture;
+  crateTex: THREE.CanvasTexture;
   contactShadow: THREE.CanvasTexture;
   muzzleFlash: THREE.CanvasTexture;
   particleGlow: THREE.CanvasTexture;
@@ -274,6 +283,144 @@ export function createProceduralTextures(renderer: THREE.WebGLRenderer): Procedu
   const subwayWall = finalizeTexture(subwC, aniso, 4, 1);
   all.push(subwayWall);
 
+  // 8. Asylum stained padded tile & quilted cell wall
+  const [asfC, asfCtx] = makeCanvas(256, 256);
+  asfCtx.fillStyle = '#1b1e23';
+  asfCtx.fillRect(0, 0, 256, 256);
+  for (let y = 0; y < 256; y += 32) {
+    for (let x = 0; x < 256; x += 32) {
+      asfCtx.fillStyle = ((x + y) / 32) % 2 === 0 ? '#242930' : '#191d22';
+      asfCtx.fillRect(x + 1, y + 1, 30, 30);
+    }
+  }
+  asfCtx.fillStyle = 'rgba(110, 20, 20, 0.2)';
+  asfCtx.beginPath();
+  asfCtx.arc(90, 170, 34, 0, Math.PI * 2);
+  asfCtx.fill();
+  addNoise(asfCtx, 256, 256, 0.12);
+  const asylumFloor = finalizeTexture(asfC, aniso, 14, 14);
+  all.push(asylumFloor);
+
+  const [aswC, aswCtx] = makeCanvas(256, 256);
+  aswCtx.fillStyle = '#2d3238';
+  aswCtx.fillRect(0, 0, 256, 256);
+  aswCtx.strokeStyle = '#171a1f';
+  aswCtx.lineWidth = 3;
+  for (let i = -256; i < 512; i += 48) {
+    aswCtx.beginPath();
+    aswCtx.moveTo(i, 90);
+    aswCtx.lineTo(i + 166, 256);
+    aswCtx.stroke();
+    aswCtx.beginPath();
+    aswCtx.moveTo(i + 166, 90);
+    aswCtx.lineTo(i, 256);
+    aswCtx.stroke();
+  }
+  addNoise(aswCtx, 256, 256, 0.12);
+  const asylumWall = finalizeTexture(aswC, aniso, 4, 1);
+  all.push(asylumWall);
+
+  // 9. Factory steel diamond plate & corrugated rust bulkhead
+  const [facfC, facfCtx] = makeCanvas(256, 256);
+  facfCtx.fillStyle = '#1a1918';
+  facfCtx.fillRect(0, 0, 256, 256);
+  facfCtx.strokeStyle = '#2e2b27';
+  facfCtx.lineWidth = 2;
+  for (let y = 0; y < 256; y += 32) {
+    for (let x = 0; x < 256; x += 32) {
+      facfCtx.strokeRect(x, y, 32, 32);
+      facfCtx.fillStyle = '#3a3028';
+      facfCtx.fillRect(x + 12, y + 12, 8, 4);
+    }
+  }
+  facfCtx.fillStyle = '#d97706';
+  facfCtx.fillRect(0, 0, 256, 8);
+  addNoise(facfCtx, 256, 256, 0.11);
+  const factoryFloor = finalizeTexture(facfC, aniso, 14, 14);
+  all.push(factoryFloor);
+
+  const [facwC, facwCtx] = makeCanvas(256, 256);
+  facwCtx.fillStyle = '#2b2420';
+  facwCtx.fillRect(0, 0, 256, 256);
+  for (let x = 0; x < 256; x += 16) {
+    facwCtx.fillStyle = x % 32 === 0 ? '#201a17' : '#352c26';
+    facwCtx.fillRect(x, 0, 12, 256);
+  }
+  facwCtx.fillStyle = '#b45309';
+  facwCtx.fillRect(0, 180, 256, 12);
+  addNoise(facwCtx, 256, 256, 0.11);
+  const factoryWall = finalizeTexture(facwC, aniso, 4, 1);
+  all.push(factoryWall);
+
+  // 10. Graveyard damp soil & stone cobble
+  const [grfC, grfCtx] = makeCanvas(256, 256);
+  grfCtx.fillStyle = '#111512';
+  grfCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 80; i++) {
+    grfCtx.fillStyle = i % 2 === 0 ? 'rgba(30, 42, 34, 0.35)' : 'rgba(25, 22, 20, 0.45)';
+    grfCtx.beginPath();
+    grfCtx.arc(Math.random() * 256, Math.random() * 256, 8 + Math.random() * 18, 0, Math.PI * 2);
+    grfCtx.fill();
+  }
+  addNoise(grfCtx, 256, 256, 0.14);
+  const graveyardFloor = finalizeTexture(grfC, aniso, 20, 20);
+  all.push(graveyardFloor);
+
+  // 11. Bunker reinforced blast concrete & hazard stripe
+  const [bkfC, bkfCtx] = makeCanvas(256, 256);
+  bkfCtx.fillStyle = '#1b1d18';
+  bkfCtx.fillRect(0, 0, 256, 256);
+  bkfCtx.strokeStyle = '#12130f';
+  bkfCtx.lineWidth = 4;
+  bkfCtx.strokeRect(2, 2, 252, 252);
+  bkfCtx.strokeRect(128, 2, 126, 126);
+  addNoise(bkfCtx, 256, 256, 0.1);
+  const bunkerFloor = finalizeTexture(bkfC, aniso, 14, 14);
+  all.push(bunkerFloor);
+
+  const [bkwC, bkwCtx] = makeCanvas(256, 256);
+  bkwCtx.fillStyle = '#2a2d24';
+  bkwCtx.fillRect(0, 0, 256, 256);
+  bkwCtx.fillStyle = '#1d2019';
+  bkwCtx.fillRect(0, 170, 256, 86);
+  bkwCtx.fillStyle = '#eab308';
+  for (let x = -32; x < 280; x += 32) {
+    bkwCtx.fillRect(x, 156, 16, 12);
+  }
+  addNoise(bkwCtx, 256, 256, 0.1);
+  const bunkerWall = finalizeTexture(bkwC, aniso, 4, 1);
+  all.push(bunkerWall);
+
+  // 12. Rooftop weathered tar & gravel concrete
+  const [rffC, rffCtx] = makeCanvas(256, 256);
+  rffCtx.fillStyle = '#191d26';
+  rffCtx.fillRect(0, 0, 256, 256);
+  rffCtx.strokeStyle = '#252b38';
+  rffCtx.lineWidth = 2;
+  for (let i = 0; i <= 256; i += 64) {
+    rffCtx.strokeRect(i, 0, 64, 256);
+  }
+  addNoise(rffCtx, 256, 256, 0.12);
+  const rooftopFloor = finalizeTexture(rffC, aniso, 16, 16);
+  all.push(rooftopFloor);
+
+  // Shipping Container / Crate Corrugated Steel
+  const [crtC, crtCtx] = makeCanvas(256, 256);
+  crtCtx.fillStyle = '#263240';
+  crtCtx.fillRect(0, 0, 256, 256);
+  for (let x = 0; x < 256; x += 24) {
+    crtCtx.fillStyle = x % 48 === 0 ? '#1e2833' : '#2f3d4d';
+    crtCtx.fillRect(x, 14, 14, 228);
+  }
+  crtCtx.strokeStyle = '#111820';
+  crtCtx.lineWidth = 10;
+  crtCtx.strokeRect(4, 4, 248, 248);
+  crtCtx.fillStyle = '#f59e0b';
+  crtCtx.fillRect(16, 24, 44, 12);
+  addNoise(crtCtx, 256, 256, 0.09);
+  const crateTex = finalizeTexture(crtC, aniso, 2, 1);
+  all.push(crateTex);
+
   // Contact shadow radial gradient
   const [csC, csCtx] = makeCanvas(128, 128);
   const grad = csCtx.createRadialGradient(64, 64, 4, 64, 64, 62);
@@ -323,6 +470,15 @@ export function createProceduralTextures(renderer: THREE.WebGLRenderer): Procedu
     catacombsWall,
     subwayFloor,
     subwayWall,
+    asylumFloor,
+    asylumWall,
+    factoryFloor,
+    factoryWall,
+    graveyardFloor,
+    bunkerFloor,
+    bunkerWall,
+    rooftopFloor,
+    crateTex,
     contactShadow,
     muzzleFlash,
     particleGlow,

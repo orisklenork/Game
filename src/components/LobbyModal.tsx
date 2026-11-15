@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Check, Copy, Play, Shield, UserPlus, Users, X } from 'lucide-react';
-import { DIFFICULTIES, DifficultyId, MapId, MAPS, WEAPONS } from '../shared/gameData';
+import { Check, Copy, Play, Swords, UserPlus, Users, X } from 'lucide-react';
+import { DIFFICULTIES, DifficultyId, GAME_MODES, GameModeId, MapId, MAPS, WEAPONS } from '../shared/gameData';
 import { PlayerProfile, RoomState } from '../lib/api';
 
 interface FriendEntry {
@@ -17,7 +17,7 @@ interface Props {
   friends: FriendEntry[];
   onToggleReady: () => void;
   onStartMatch: () => void;
-  onChangeConfig: (mapId: MapId, difficulty: DifficultyId) => void;
+  onChangeConfig: (mapId: MapId, difficulty: DifficultyId, gameMode?: GameModeId) => void;
   onInviteFriend: (friendId: string) => void;
   onLeaveRoom: () => void;
 }
@@ -39,6 +39,8 @@ export function LobbyModal({
   const selfMember = room.players.find((p) => p.playerId === profile.id);
   const partnerMember = room.players.find((p) => p.playerId !== profile.id);
   const mapDef = MAPS[room.mapId];
+  const currentMode: GameModeId = room.gameMode || 'unlimited';
+  const modeDef = GAME_MODES[currentMode] || GAME_MODES.unlimited;
 
   const handleCopy = () => {
     navigator.clipboard?.writeText(room.id).catch(() => {});
@@ -57,7 +59,9 @@ export function LobbyModal({
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-800">
           <div>
-            <div className="text-xs text-slate-400">Two-Player Co-Op Lobby</div>
+            <div className="text-xs text-slate-400">
+              {modeDef.noMonsters ? '1v1 Arena Duel Lobby' : 'Two-Player Co-Op Lobby'}
+            </div>
             <div className="flex items-center gap-3 mt-1">
               <h2 className="font-display text-2xl font-bold text-slate-100">Room {room.id}</h2>
               <button
@@ -87,7 +91,6 @@ export function LobbyModal({
               <span>Squad ({room.players.length}/2)</span>
             </div>
 
-            {/* Slot 1 (Local) */}
             {selfMember && (
               <div className="bg-[#131924] border border-slate-700/40 rounded-lg p-4">
                 <div className="flex items-center justify-between gap-2">
@@ -107,7 +110,6 @@ export function LobbyModal({
               </div>
             )}
 
-            {/* Slot 2 (Partner or Open) */}
             {partnerMember ? (
               <div className="bg-[#131924] border border-sky-700/40 rounded-lg p-4">
                 <div className="flex items-center justify-between gap-2">
@@ -169,14 +171,16 @@ export function LobbyModal({
             </div>
           </div>
 
-          {/* Right: Map & Difficulty Config */}
+          {/* Right: 12-Map Selector, Mode Selector & Difficulty */}
           <div className="lg:col-span-2 space-y-5">
             <div>
-              <div className="flex items-center justify-between mb-2.5">
-                <span className="text-sm font-semibold text-slate-200">Select Horror Map</span>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-semibold text-slate-200">
+                  Select Horror Map ({Object.keys(MAPS).length})
+                </span>
                 {!isHost && <span className="text-xs text-slate-400">Host controls map selection</span>}
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
                 {(Object.keys(MAPS) as MapId[]).map((mid) => {
                   const m = MAPS[mid];
                   const selected = room.mapId === mid;
@@ -184,8 +188,8 @@ export function LobbyModal({
                     <button
                       key={mid}
                       disabled={!isHost}
-                      onClick={() => onChangeConfig(mid, room.difficulty)}
-                      className={`text-left p-3.5 rounded-lg border transition-colors ${
+                      onClick={() => onChangeConfig(mid, room.difficulty, currentMode)}
+                      className={`text-left p-3 rounded-lg border transition-colors ${
                         selected
                           ? 'bg-red-950/35 border-red-600 text-slate-100'
                           : 'bg-[#131924] border-slate-700/40 text-slate-300 hover:border-slate-500'
@@ -193,9 +197,44 @@ export function LobbyModal({
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-display font-semibold text-sm">{m.name}</span>
-                        <span className="font-mono-num text-xs text-amber-400">Hazard {m.difficultyRating}/5</span>
+                        <span className="font-mono-num text-[11px] text-amber-400 shrink-0">
+                          Hazard {m.difficultyRating}/5
+                        </span>
                       </div>
-                      <div className="text-xs text-slate-400 mt-1 line-clamp-2">{m.description}</div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">{m.subtitle}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Game Mode Selector */}
+            <div>
+              <div className="text-sm font-semibold text-slate-200 mb-2">Match Mode</div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {(Object.keys(GAME_MODES) as GameModeId[]).map((moid) => {
+                  const gm = GAME_MODES[moid];
+                  const selected = currentMode === moid;
+                  return (
+                    <button
+                      key={moid}
+                      disabled={!isHost}
+                      onClick={() => onChangeConfig(room.mapId, room.difficulty, moid)}
+                      className={`text-left p-2.5 rounded-lg border transition-colors ${
+                        selected
+                          ? gm.noMonsters
+                            ? 'bg-sky-950/45 border-sky-500 text-slate-100'
+                            : 'bg-amber-950/35 border-amber-500 text-slate-100'
+                          : 'bg-[#131924] border-slate-700/40 text-slate-300 hover:border-slate-500'
+                      } ${isHost ? 'cursor-pointer' : 'cursor-default opacity-85'}`}
+                    >
+                      <div className="font-display font-semibold text-xs flex items-center gap-1">
+                        {gm.noMonsters && <Swords className="w-3 h-3 text-sky-400 shrink-0" />}
+                        <span className="truncate">{gm.name}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">
+                        {gm.noMonsters ? 'No Zombies · 5 Wins' : `Boss /${gm.bossInterval}w`}
+                      </div>
                     </button>
                   );
                 })}
@@ -203,7 +242,7 @@ export function LobbyModal({
             </div>
 
             <div>
-              <div className="text-sm font-semibold text-slate-200 mb-2">Difficulty Mode</div>
+              <div className="text-sm font-semibold text-slate-200 mb-2">Difficulty Scaling</div>
               <div className="grid grid-cols-3 gap-2.5">
                 {(Object.keys(DIFFICULTIES) as DifficultyId[]).map((did) => {
                   const d = DIFFICULTIES[did];
@@ -212,7 +251,7 @@ export function LobbyModal({
                     <button
                       key={did}
                       disabled={!isHost}
-                      onClick={() => onChangeConfig(room.mapId, did)}
+                      onClick={() => onChangeConfig(room.mapId, did, currentMode)}
                       className={`text-left p-3 rounded-lg border transition-colors ${
                         selected
                           ? 'bg-red-950/35 border-red-600 text-slate-100'
@@ -232,10 +271,12 @@ export function LobbyModal({
               <div>
                 <div className="text-xs text-slate-400">Deployment Zone</div>
                 <div className="font-display font-semibold text-base text-slate-100">
-                  {mapDef.name} · {mapDef.subtitle}
+                  {mapDef.name} · {modeDef.name}
                 </div>
                 <div className="text-xs text-slate-400 mt-0.5">
-                  Endless waves with Abomination Titan Boss every 5 waves · Squad votes area &amp; mode at launch.
+                  {modeDef.noMonsters
+                    ? '1v1 PvP multi-round arena duel · No zombies · First to 5 wins.'
+                    : 'Endless waves with Titan Boss every 5 waves · Squad votes map & mode at launch.'}
                 </div>
               </div>
 
@@ -257,7 +298,7 @@ export function LobbyModal({
                     className="flex items-center gap-2 px-6 py-2.5 rounded-lg font-display font-bold text-sm bg-red-600 hover:bg-red-500 text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    <span>{room.players.length === 2 ? 'Vote & Deploy Co-Op' : 'Vote & Deploy'}</span>
+                    <span>{room.players.length === 2 ? 'Vote & Deploy' : 'Vote & Launch'}</span>
                   </button>
                 )}
               </div>

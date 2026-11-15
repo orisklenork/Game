@@ -1,35 +1,48 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
+  Camera,
+  ChevronRight,
+  Coins,
   Crosshair,
   Flashlight,
   HeartPulse,
+  MessageSquare,
   Pause,
   RotateCw,
-  Skull,
-  Coins,
+  Send,
   Shield,
+  Skull,
+  Swords,
 } from 'lucide-react';
-import {
-  GAME_MODES,
-  HEALTH_PURCHASE_COST,
-  MAX_HEALTH_PURCHASES_PER_MATCH,
-  WEAPON_ORDER,
-  WEAPONS,
-  WeaponId,
-} from '../shared/gameData';
+import { GAME_MODES, WEAPON_ORDER, WEAPONS, WeaponId } from '../shared/gameData';
 import { HudSnapshot } from '../game/GameEngine';
+
+export interface ChatMessageItem {
+  id: string;
+  senderId: string;
+  username: string;
+  text: string;
+  ts: number;
+}
 
 interface Props {
   hud: HudSnapshot;
+  localPlayerId: string;
+  localUsername: string;
   ownedWeapons: Record<string, { upgradeLevel: number }>;
   hitMarker: { active: boolean; killed: boolean };
   waveBanner: string | null;
   damageFlash: boolean;
   healPulse: boolean;
   mobileControls: boolean;
+  chatMessages: ChatMessageItem[];
+  onSendChat: (text: string) => void;
+  onChatTypingChange: (typing: boolean) => void;
   onPause: () => void;
   onBuyHealth: () => void;
   onSwitchWeapon: (id: WeaponId) => void;
+  onCycleWeapon: () => void;
+  onCycleCameraView: () => void;
   onReload: () => void;
   onToggleFlashlight: () => void;
   onLockPointer: () => void;
@@ -42,15 +55,22 @@ interface Props {
 
 export function GameHud({
   hud,
+  localPlayerId,
+  localUsername,
   ownedWeapons,
   hitMarker,
   waveBanner,
   damageFlash,
   healPulse,
   mobileControls,
+  chatMessages,
+  onSendChat,
+  onChatTypingChange,
   onPause,
   onBuyHealth,
   onSwitchWeapon,
+  onCycleWeapon,
+  onCycleCameraView,
   onReload,
   onToggleFlashlight,
   onLockPointer,
@@ -66,6 +86,7 @@ export function GameHud({
   const lookPrev = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const fireTouchId = useRef<number | null>(null);
   const firePrev = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const chatInputRef = useRef<HTMLInputElement>(null);
 
   const [joyKnob, setJoyKnob] = useState<{ x: number; y: number; active: boolean; sprinting: boolean }>({
     x: 0,
@@ -74,14 +95,64 @@ export function GameHud({
     sprinting: false,
   });
   const [mobileAdsOn, setMobileAdsOn] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatDraft, setChatDraft] = useState('');
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
-  const remainingHealthBuys = MAX_HEALTH_PURCHASES_PER_MATCH - hud.healthPurchasesUsed;
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const openChat = () => {
+    setChatOpen(true);
+    onChatTypingChange(true);
+    window.setTimeout(() => chatInputRef.current?.focus(), 20);
+  };
+
+  const closeChat = () => {
+    setChatOpen(false);
+    setChatDraft('');
+    onChatTypingChange(false);
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+      if (!isInput && (e.code === 'KeyT' || e.code === 'Enter')) {
+        e.preventDefault();
+        openChat();
+      } else if (chatOpen && e.code === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeChat();
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+
+  const handleChatSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = chatDraft.trim();
+    if (trimmed) {
+      onSendChat(trimmed);
+    }
+    closeChat();
+  };
+
   const mins = Math.floor(hud.elapsedSec / 60);
   const secs = String(hud.elapsedSec % 60).padStart(2, '0');
   const modeDef = GAME_MODES[hud.gameMode] || GAME_MODES.unlimited;
+  const isDuel = hud.gameMode === 'duel_1v1' || Boolean(modeDef.noMonsters);
   const bossInterval = modeDef.bossInterval || 5;
-  const isBossWave = hud.wave % bossInterval === 0;
-  const wavesToBoss = bossInterval - (hud.wave % bossInterval || bossInterval);
+  const isBossWave = !isDuel && bossInterval > 0 && hud.wave % bossInterval === 0;
+  const wavesToBoss = bossInterval > 0 ? bossInterval - (hud.wave % bossInterval || bossInterval) : 0;
+
+  const oppId = hud.teammate?.playerId || '';
+  const myDuelScore = hud.duel?.roundScores[localPlayerId] ?? 0;
+  const oppDuelScore = oppId ? hud.duel?.roundScores[oppId] ?? 0 : 0;
 
   const mapRadius = 56;
   const toMini = (wx: number, wz: number) => {
@@ -100,6 +171,12 @@ export function GameHud({
     }
     return null;
   };
+
+  const visibleChat = chatOpen
+    ? chatMessages.slice(-6)
+    : chatMessages.filter((m) => nowTick - m.ts < 10000).slice(-5);
+
+  const viewLabel = hud.cameraView === '1st' ? '1ST PERSON' : hud.cameraView === '2nd' ? '2ND PERSON' : '3RD PERSON';
 
   return (
     <div className="fixed inset-0 z-20 pointer-events-none select-none overflow-hidden">
@@ -128,8 +205,8 @@ export function GameHud({
         </div>
       )}
 
-      {/* TOP LEFT: Player Health, Medkit Purchases, Teammate Health */}
-      <div className="absolute top-3 left-3 sm:top-4 sm:left-4 flex flex-col gap-2 max-w-[230px] sm:max-w-xs">
+      {/* TOP LEFT: Player Health, Infinite Escalating Medkit, Teammate or Opponent HP */}
+      <div className="absolute top-3 left-3 sm:top-4 sm:left-4 flex flex-col gap-2 max-w-[250px] sm:max-w-xs">
         <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/45 rounded-xl px-3.5 py-2.5 sm:px-4 sm:py-3 shadow-lg">
           <div className="flex items-center justify-between gap-4 mb-1.5">
             <span className="text-xs font-medium text-slate-300">Health</span>
@@ -148,24 +225,28 @@ export function GameHud({
           <div className="mt-2 flex items-center justify-between gap-2 pointer-events-auto">
             <button
               onClick={onBuyHealth}
-              disabled={remainingHealthBuys <= 0 || hud.hp >= hud.maxHp || !hud.alive}
+              disabled={hud.hp >= hud.maxHp || !hud.alive}
               className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-emerald-700/80 disabled:opacity-45 text-slate-100 transition-colors cursor-pointer disabled:cursor-not-allowed whitespace-nowrap shrink-0"
             >
               <HeartPulse className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Medkit ({HEALTH_PURCHASE_COST}c)</span>
+              <span>Medkit ({hud.medkitCost}c)</span>
             </button>
             <span className="font-mono-num text-[11px] text-slate-400">
-              {remainingHealthBuys}/{MAX_HEALTH_PURCHASES_PER_MATCH} [H]
+              Used {hud.healthPurchasesUsed} [H]
             </span>
           </div>
         </div>
 
-        {/* Teammate Status (2-player co-op) */}
+        {/* Teammate (Co-op) or Duel Opponent HP */}
         {hud.teammate && (
-          <div className="bg-[#0a0e16]/85 backdrop-blur-md border border-sky-700/40 rounded-xl px-3.5 py-2">
+          <div
+            className={`bg-[#0a0e16]/85 backdrop-blur-md border rounded-xl px-3.5 py-2 ${
+              isDuel ? 'border-red-700/50' : 'border-sky-700/40'
+            }`}
+          >
             <div className="flex items-center justify-between gap-3 mb-1">
-              <span className="text-xs font-medium text-sky-300 truncate max-w-[130px]">
-                {hud.teammate.username}
+              <span className={`text-xs font-medium truncate max-w-[130px] ${isDuel ? 'text-red-300' : 'text-sky-300'}`}>
+                {isDuel ? `VS ${hud.teammate.username}` : hud.teammate.username}
               </span>
               <span className="font-mono-num text-xs text-slate-300">
                 {hud.teammate.alive ? `${Math.ceil(hud.teammate.hp)} HP` : 'DOWN'}
@@ -173,7 +254,9 @@ export function GameHud({
             </div>
             <div className="w-40 h-1.5 bg-slate-900 rounded-sm overflow-hidden">
               <div
-                className={`h-full ${hud.teammate.alive ? 'bg-sky-500' : 'bg-red-800'}`}
+                className={`h-full ${
+                  !hud.teammate.alive ? 'bg-red-900' : isDuel ? 'bg-red-500' : 'bg-sky-500'
+                }`}
                 style={{ width: `${Math.max(0, (hud.teammate.hp / hud.teammate.maxHp) * 100)}%` }}
               />
             </div>
@@ -181,36 +264,64 @@ export function GameHud({
         )}
       </div>
 
-      {/* TOP CENTER: Unlimited Wave, Mode, Timer, Hostiles + Boss Bar */}
+      {/* TOP CENTER: 1v1 Round Scoreboard OR Zombie Wave HUD */}
       <div className="absolute top-3 sm:top-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
-        <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/45 rounded-xl px-3.5 sm:px-5 py-2 flex items-center gap-3.5 sm:gap-5 shadow-lg">
-          <div className="text-center">
-            <div className="text-[10px] uppercase tracking-wider text-slate-400">{modeDef.name}</div>
-            <div className="font-display font-bold text-base sm:text-lg text-slate-100 font-mono-num leading-tight">
-              WAVE {hud.wave}{' '}
-              <span className="text-xs font-semibold text-amber-400">
-                {isBossWave ? '· BOSS' : `· BOSS -${wavesToBoss}`}
-              </span>
+        {isDuel && hud.duel ? (
+          <div className="bg-[#0a0e16]/92 backdrop-blur-md border border-sky-600/45 rounded-xl px-4 sm:px-6 py-2 flex items-center gap-4 sm:gap-6 shadow-xl">
+            <div className="text-right">
+              <div className="text-[10px] uppercase tracking-wider text-emerald-400 truncate max-w-[90px]">
+                {localUsername}
+              </div>
+              <div className="font-mono-num text-xl font-bold text-emerald-300 leading-tight">{myDuelScore}</div>
+            </div>
+
+            <div className="text-center px-2 border-x border-slate-800">
+              <div className="text-[10px] uppercase tracking-wider text-sky-300 flex items-center justify-center gap-1">
+                <Swords className="w-3 h-3" />
+                <span>ROUND {hud.duel.round} · FT{hud.duel.roundsToWin}</span>
+              </div>
+              <div className="font-mono-num font-bold text-base text-slate-100 leading-tight">
+                {hud.duel.roundState === 'intermission' ? 'NEXT RD' : `${hud.duel.roundTimeLeftSec}s`}
+              </div>
+            </div>
+
+            <div className="text-left">
+              <div className="text-[10px] uppercase tracking-wider text-red-400 truncate max-w-[90px]">
+                {hud.teammate?.username || 'Opponent'}
+              </div>
+              <div className="font-mono-num text-xl font-bold text-red-300 leading-tight">{oppDuelScore}</div>
             </div>
           </div>
-          <div className="w-px h-7 bg-slate-800" />
-          <div className="text-center">
-            <div className="text-[10px] uppercase tracking-wider text-slate-400">Time</div>
-            <div className="font-mono-num font-semibold text-sm sm:text-base text-slate-100 leading-tight">
-              {mins}:{secs}
+        ) : (
+          <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/45 rounded-xl px-3.5 sm:px-5 py-2 flex items-center gap-3.5 sm:gap-5 shadow-lg">
+            <div className="text-center">
+              <div className="text-[10px] uppercase tracking-wider text-slate-400">{modeDef.name}</div>
+              <div className="font-display font-bold text-base sm:text-lg text-slate-100 font-mono-num leading-tight">
+                WAVE {hud.wave}{' '}
+                <span className="text-xs font-semibold text-amber-400">
+                  {isBossWave ? '· BOSS' : `· BOSS -${wavesToBoss}`}
+                </span>
+              </div>
+            </div>
+            <div className="w-px h-7 bg-slate-800" />
+            <div className="text-center">
+              <div className="text-[10px] uppercase tracking-wider text-slate-400">Time</div>
+              <div className="font-mono-num font-semibold text-sm sm:text-base text-slate-100 leading-tight">
+                {mins}:{secs}
+              </div>
+            </div>
+            <div className="w-px h-7 bg-slate-800" />
+            <div className="text-center">
+              <div className="text-[10px] uppercase tracking-wider text-slate-400">Hostiles</div>
+              <div className="font-mono-num font-semibold text-sm sm:text-base text-red-400 leading-tight">
+                {hud.monstersRemaining}
+              </div>
             </div>
           </div>
-          <div className="w-px h-7 bg-slate-800" />
-          <div className="text-center">
-            <div className="text-[10px] uppercase tracking-wider text-slate-400">Hostiles</div>
-            <div className="font-mono-num font-semibold text-sm sm:text-base text-red-400 leading-tight">
-              {hud.monstersRemaining}
-            </div>
-          </div>
-        </div>
+        )}
 
         {/* Boss HP Bar */}
-        {hud.boss && (
+        {!isDuel && hud.boss && (
           <div className="w-64 sm:w-80 bg-[#0d080c]/92 border border-red-600/60 rounded-xl px-4 py-2 shadow-xl">
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="font-display font-bold text-red-300 tracking-wide uppercase">
@@ -230,19 +341,30 @@ export function GameHud({
         )}
       </div>
 
-      {/* TOP RIGHT: Score, Coins, Tactical Minimap, Pause */}
-      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 flex items-start gap-2.5">
-        <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/45 rounded-xl px-3 py-2 text-right space-y-0.5 shadow-lg">
-          <div className="flex items-center justify-end gap-1.5 text-xs text-slate-300">
-            <Skull className="w-3.5 h-3.5 text-red-500" />
-            <span className="font-mono-num font-semibold text-slate-100">{hud.kills}</span>
-            <span className="text-slate-500">·</span>
-            <span className="font-mono-num text-slate-300">{hud.score.toLocaleString()}</span>
+      {/* TOP RIGHT: Camera View Switch, Score, Coins, Minimap, Pause */}
+      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 flex items-start gap-2">
+        <div className="flex flex-col items-end gap-1.5">
+          <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/45 rounded-xl px-3 py-2 text-right space-y-0.5 shadow-lg">
+            <div className="flex items-center justify-end gap-1.5 text-xs text-slate-300">
+              <Skull className="w-3.5 h-3.5 text-red-500" />
+              <span className="font-mono-num font-semibold text-slate-100">{hud.kills}</span>
+              <span className="text-slate-500">·</span>
+              <span className="font-mono-num text-slate-300">{hud.score.toLocaleString()}</span>
+            </div>
+            <div className="flex items-center justify-end gap-1 text-xs text-amber-400">
+              <Coins className="w-3.5 h-3.5" />
+              <span className="font-mono-num font-semibold">+{hud.coinsEarned}</span>
+            </div>
           </div>
-          <div className="flex items-center justify-end gap-1 text-xs text-amber-400">
-            <Coins className="w-3.5 h-3.5" />
-            <span className="font-mono-num font-semibold">+{hud.coinsEarned}</span>
-          </div>
+
+          <button
+            onClick={onCycleCameraView}
+            className="pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0a0e16]/88 border border-slate-700/50 hover:border-sky-400 text-[11px] font-mono-num font-semibold text-sky-300 cursor-pointer shadow"
+            title="Cycle Camera View [C]"
+          >
+            <Camera className="w-3.5 h-3.5" />
+            <span>[C] {viewLabel}</span>
+          </button>
         </div>
 
         {/* Minimap */}
@@ -273,12 +395,20 @@ export function GameHud({
                 />
               );
             })}
-            {hud.teammate && hud.teammate.alive && (
+            {!isDuel && hud.teammate && hud.teammate.alive && (
               <circle
                 cx={toMini(hud.teammate.x, hud.teammate.z).cx}
                 cy={toMini(hud.teammate.x, hud.teammate.z).cy}
                 r={3.5}
                 fill="#38bdf8"
+              />
+            )}
+            {hud.minimap.opponent && hud.minimap.opponent.alive && (
+              <circle
+                cx={toMini(hud.minimap.opponent.x, hud.minimap.opponent.z).cx}
+                cy={toMini(hud.minimap.opponent.x, hud.minimap.opponent.z).cy}
+                r={3.8}
+                fill="#ef4444"
               />
             )}
             <circle cx={pMini.cx} cy={pMini.cy} r={3.8} fill="#22c55e" />
@@ -294,7 +424,7 @@ export function GameHud({
         </button>
       </div>
 
-      {/* CENTER: Crosshair, Hit Marker, Reload Indicator, Wave Banner, Paused-By Banner */}
+      {/* CENTER: Crosshair, Hit Marker, Reload, Wave/Round Banner, Pause Banner */}
       <div className="absolute inset-0 flex items-center justify-center">
         <div className="relative flex items-center justify-center">
           <div className="w-1.5 h-1.5 rounded-full bg-slate-100/95 shadow" />
@@ -336,7 +466,6 @@ export function GameHud({
           </div>
         )}
 
-        {/* Multiplayer Pause Overlay (teammate sees this while NPCs are frozen) */}
         {hud.pausedBy.length > 0 && (
           <div className="absolute top-[34%] bg-[#0b101b]/95 border border-amber-500/70 rounded-2xl px-6 py-4 text-center shadow-2xl max-w-sm">
             <div className="flex items-center justify-center gap-2 text-amber-400 font-display font-bold text-lg">
@@ -344,33 +473,100 @@ export function GameHud({
               <span>PAUSED BY {hud.pausedBy.join(', ').toUpperCase()}</span>
             </div>
             <div className="text-xs text-slate-300 mt-1">
-              All monsters are frozen and cannot attack until resumed.
+              Combat &amp; NPCs are frozen until resumed.
             </div>
           </div>
         )}
 
-        {!mobileControls && !hud.pointerLocked && hud.alive && hud.pausedBy.length === 0 && (
+        {!mobileControls && !hud.pointerLocked && hud.alive && hud.pausedBy.length === 0 && !chatOpen && (
           <button
             onClick={onLockPointer}
             className="pointer-events-auto absolute top-[63%] bg-[#0a0e16]/90 border border-slate-600/60 hover:border-red-500 rounded-xl px-4 py-2 text-xs text-slate-200 cursor-pointer shadow-lg"
           >
-            Click screen to aim &amp; hold Fire to spray · ESC to pause
+            Click to aim · Hold Fire · [C] View · [Q] Next Gun · [T] Chat · [H] Medkit
           </button>
         )}
 
         {!hud.alive && (
           <div className="absolute top-[34%] bg-red-950/92 border border-red-600/70 rounded-xl px-6 py-4 text-center shadow-2xl">
-            <div className="font-display text-2xl font-bold text-red-200">YOU HAVE FALLEN</div>
-            <div className="text-xs text-red-300 mt-1">
-              {hud.teammate?.alive ? 'Spectating teammate until wave ends...' : 'Match ending...'}
+            <div className="font-display text-2xl font-bold text-red-200">
+              {isDuel ? 'ROUND ELIMINATED' : 'YOU HAVE FALLEN'}
             </div>
+            <div className="text-xs text-red-300 mt-1">
+              {isDuel
+                ? 'Next round starting shortly...'
+                : hud.teammate?.alive
+                ? 'Spectating teammate until wave ends...'
+                : 'Match ending...'}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* IN-GAME CHAT OVERLAY (Bottom-Left on Desktop, Top-Left lower on Mobile) */}
+      <div
+        className={`absolute ${
+          mobileControls ? 'top-36 left-3 max-w-[230px]' : 'bottom-4 left-4 w-80'
+        } flex flex-col gap-1.5`}
+      >
+        {visibleChat.length > 0 && (
+          <div className="bg-[#080c13]/82 backdrop-blur-sm border border-slate-700/45 rounded-xl px-3 py-2 space-y-1 max-h-40 overflow-y-auto">
+            {visibleChat.map((m) => (
+              <div key={m.id} className="text-xs leading-snug break-words">
+                <span
+                  className={`font-semibold mr-1.5 ${
+                    m.senderId === localPlayerId ? 'text-emerald-400' : 'text-sky-300'
+                  }`}
+                >
+                  {m.username}:
+                </span>
+                <span className="text-slate-100">{m.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {chatOpen ? (
+          <form
+            onSubmit={handleChatSubmit}
+            className="pointer-events-auto flex items-center gap-1.5 bg-[#0a0e16]/95 border border-red-500/70 rounded-xl p-1.5 shadow-xl"
+          >
+            <input
+              ref={chatInputRef}
+              type="text"
+              maxLength={160}
+              value={chatDraft}
+              onChange={(e) => setChatDraft(e.target.value)}
+              onBlur={() => {
+                if (!chatDraft.trim()) closeChat();
+              }}
+              placeholder="Message squad / opponent..."
+              className="flex-1 bg-transparent px-2 py-1 text-xs text-slate-100 focus:outline-none"
+            />
+            <button
+              type="submit"
+              className="p-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white cursor-pointer"
+              aria-label="Send Message"
+            >
+              <Send className="w-3.5 h-3.5" />
+            </button>
+          </form>
+        ) : (
+          <div className="pointer-events-auto flex items-center gap-1.5">
+            <button
+              onClick={openChat}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#0a0e16]/82 border border-slate-700/50 hover:border-slate-500 text-[11px] text-slate-300 cursor-pointer"
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+              <span>{mobileControls ? 'Chat' : 'Chat [T]'}</span>
+            </button>
           </div>
         )}
       </div>
 
       {/* DESKTOP BOTTOM RIGHT: Weapon Info + Quick Switch Bar */}
       {!mobileControls && (
-        <div className="absolute bottom-4 right-4 flex flex-col items-end gap-2">
+        <div className="absolute bottom-4 right-4 flex flex-col items-end gap-2 max-w-[56vw]">
           <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/45 rounded-xl px-4 py-2.5 text-right shadow-lg">
             <div className="flex items-center justify-end gap-2">
               <button
@@ -383,30 +579,45 @@ export function GameHud({
               <span className="font-display font-semibold text-base text-slate-100">{hud.weaponName}</span>
             </div>
             <div className="font-mono-num text-2xl font-bold text-slate-100 mt-0.5">
-              {hud.ammo} <span className="text-sm font-normal text-slate-400">/ ∞</span>
+              {hud.isMelee ? (
+                <span>∞</span>
+              ) : (
+                <>
+                  {hud.ammo} <span className="text-sm font-normal text-slate-400">/ ∞</span>
+                </>
+              )}
             </div>
           </div>
 
-          <div className="hidden md:flex items-center gap-1 pointer-events-auto">
-            {WEAPON_ORDER.map((wid, idx) => {
-              const owned = Boolean(ownedWeapons[wid]);
-              if (!owned) return null;
-              const active = hud.weaponId === wid;
-              return (
-                <button
-                  key={wid}
-                  onClick={() => onSwitchWeapon(wid)}
-                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                    active
-                      ? 'bg-red-600 text-white shadow'
-                      : 'bg-[#0a0e16]/88 border border-slate-700/45 text-slate-300 hover:text-white'
-                  }`}
-                >
-                  <span className="font-mono-num opacity-70 mr-1">{idx + 1}</span>
-                  {WEAPONS[wid].name.split(' ')[0]}
-                </button>
-              );
-            })}
+          <div className="hidden md:flex items-center gap-1 pointer-events-auto max-w-full">
+            <button
+              onClick={onCycleWeapon}
+              className="px-2.5 py-1.5 rounded-lg bg-[#0a0e16]/90 border border-slate-700/60 hover:border-amber-400 text-xs font-semibold text-amber-300 cursor-pointer shrink-0 flex items-center gap-1"
+              title="Next Unlocked Weapon [Q]"
+            >
+              <span>[Q]</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+            <div className="flex items-center gap-1 overflow-x-auto max-w-md py-0.5">
+              {WEAPON_ORDER.map((wid, idx) => {
+                if (!ownedWeapons[wid]) return null;
+                const active = hud.weaponId === wid;
+                return (
+                  <button
+                    key={wid}
+                    onClick={() => onSwitchWeapon(wid)}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      active
+                        ? 'bg-red-600 text-white shadow'
+                        : 'bg-[#0a0e16]/88 border border-slate-700/45 text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    {idx < 9 && <span className="font-mono-num opacity-70 mr-1">{idx + 1}</span>}
+                    {WEAPONS[wid].name}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -415,10 +626,12 @@ export function GameHud({
       {mobileControls && (
         <>
           {/* Compact Weapon + Ammo Strip at Bottom Center */}
-          <div className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 max-w-[54vw]">
+          <div className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 max-w-[52vw]">
             <div className="bg-[#0a0e16]/88 backdrop-blur-md border border-slate-700/50 rounded-full px-3.5 py-1 flex items-center gap-2.5 text-xs">
               <span className="font-display font-semibold text-slate-100 truncate">{hud.weaponName}</span>
-              <span className="font-mono-num font-bold text-amber-300">{hud.ammo}/∞</span>
+              <span className="font-mono-num font-bold text-amber-300">
+                {hud.isMelee ? '∞' : `${hud.ammo}/∞`}
+              </span>
               <button
                 onClick={onToggleFlashlight}
                 className="p-0.5 text-slate-300"
@@ -435,7 +648,7 @@ export function GameHud({
                   <button
                     key={wid}
                     onClick={() => onSwitchWeapon(wid)}
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap ${
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap shrink-0 ${
                       active
                         ? 'bg-red-600 text-white'
                         : 'bg-[#0a0e16]/85 border border-slate-700/50 text-slate-300'
@@ -448,7 +661,7 @@ export function GameHud({
             </div>
           </div>
 
-          {/* Left Virtual Movement Joystick (Multi-touch tracked) */}
+          {/* Left Virtual Movement Joystick */}
           <div
             className="pointer-events-auto absolute bottom-6 left-5 w-36 h-36 rounded-full bg-slate-950/55 border-2 border-slate-600/45 flex items-center justify-center touch-none"
             onTouchStart={(e) => {
@@ -498,7 +711,6 @@ export function GameHud({
               onMobileMove(0, 0);
             }}
           >
-            {/* Sprint outer indicator */}
             <span className="absolute -top-5 text-[10px] font-semibold tracking-wider text-slate-400">
               {joyKnob.sprinting ? 'SPRINTING' : 'MOVE'}
             </span>
@@ -516,7 +728,7 @@ export function GameHud({
             />
           </div>
 
-          {/* Right Look Surface (Multi-touch tracked) */}
+          {/* Right Look Surface */}
           <div
             className="pointer-events-auto absolute inset-y-16 right-0 w-[55%] touch-none"
             onTouchStart={(e) => {
@@ -543,16 +755,23 @@ export function GameHud({
 
           {/* Ergonomic Mobile Action Cluster */}
           <div className="pointer-events-auto absolute bottom-6 right-5 flex flex-col items-end gap-3 touch-none">
-            {/* Top Utility Row: Medkit, ADS Toggle, Reload */}
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onCycleCameraView}
+                className="w-11 h-11 rounded-full bg-slate-900/85 border border-sky-500/60 text-sky-300 flex flex-col items-center justify-center active:scale-95"
+                aria-label="Camera View"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span className="text-[9px] font-mono-num">{hud.cameraView}</span>
+              </button>
               <button
                 onClick={onBuyHealth}
-                disabled={remainingHealthBuys <= 0 || hud.hp >= hud.maxHp || !hud.alive}
+                disabled={hud.hp >= hud.maxHp || !hud.alive}
                 className="w-12 h-12 rounded-full bg-emerald-950/85 border border-emerald-500/60 disabled:opacity-40 text-emerald-300 flex flex-col items-center justify-center active:scale-95"
                 aria-label="Medkit"
               >
                 <HeartPulse className="w-4 h-4" />
-                <span className="text-[9px] font-mono-num">{remainingHealthBuys}</span>
+                <span className="text-[9px] font-mono-num">{hud.medkitCost}c</span>
               </button>
               <button
                 onClick={() => {
@@ -578,7 +797,6 @@ export function GameHud({
               </button>
             </div>
 
-            {/* Bottom Combat Row: Jump + Drag-to-Aim Hold-to-Spam Fire */}
             <div className="flex items-center gap-3">
               <button
                 onTouchStart={(e) => {
@@ -602,7 +820,6 @@ export function GameHud({
                 onTouchMove={(e) => {
                   const t = findTouchById(e.touches, fireTouchId.current);
                   if (!t) return;
-                  // Allow aiming while holding FIRE!
                   onMobileLook((t.clientX - firePrev.current.x) * 1.25, (t.clientY - firePrev.current.y) * 1.25);
                   firePrev.current = { x: t.clientX, y: t.clientY };
                 }}

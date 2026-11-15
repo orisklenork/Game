@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
-import { ArrowUpCircle, Check, Coins, X } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { ArrowUpCircle, Check, Coins, Search, X } from 'lucide-react';
 import {
   CUSTOMIZATION_ITEMS,
   CustomizationCategory,
   getWeaponStatsAtLevel,
   getWeaponUpgradeCost,
+  WEAPON_CLASSES,
   WEAPON_ORDER,
+  WeaponClass,
   WEAPONS,
   WeaponId,
 } from '../shared/gameData';
@@ -33,7 +35,9 @@ const CUSTOM_CATEGORIES: Array<{ id: CustomizationCategory; label: string }> = [
 
 export function ShopAndCustomize({ initialTab, profile, onProfileUpdated, onClose }: Props) {
   const [tab, setTab] = useState<'shop' | 'customize' | 'inventory'>(initialTab);
-  const [customCat, setCustomCat] = useState<CustomizationCategory>('mask');
+  const [weaponClassFilter, setWeaponClassFilter] = useState<'all' | WeaponClass>('all');
+  const [weaponSearch, setWeaponSearch] = useState('');
+  const [customCat, setCustomCat] = useState<CustomizationCategory>('weapon_skin');
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ msg: string; error?: boolean } | null>(null);
 
@@ -85,19 +89,33 @@ export function ShopAndCustomize({ initialTab, profile, onProfileUpdated, onClos
     }
   };
 
+  const filteredWeapons = useMemo(() => {
+    const q = weaponSearch.trim().toLowerCase();
+    return WEAPON_ORDER.filter((wid) => {
+      const w = WEAPONS[wid];
+      if (weaponClassFilter !== 'all' && w.weaponClass !== weaponClassFilter) return false;
+      if (!q) return true;
+      return (
+        w.name.toLowerCase().includes(q) ||
+        w.category.toLowerCase().includes(q) ||
+        w.description.toLowerCase().includes(q)
+      );
+    });
+  }, [weaponClassFilter, weaponSearch]);
+
   const categoryItems = CUSTOMIZATION_ITEMS.filter((i) => i.category === customCat);
   const ownedCustomItems = CUSTOMIZATION_ITEMS.filter((i) => profile.customizations.includes(i.id));
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/80">
-      <div className="w-full max-w-6xl bg-[#0d1118] border border-slate-700/40 rounded-xl p-6 shadow-2xl max-h-[92vh] flex flex-col">
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-3 sm:p-4 bg-black/82">
+      <div className="w-full max-w-6xl bg-[#0d1118] border border-slate-700/45 rounded-xl p-5 sm:p-6 shadow-2xl max-h-[93vh] flex flex-col">
         {/* Top Bar */}
         <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {(
               [
-                ['shop', 'Weapon Shop'],
-                ['customize', 'Character Customization'],
+                ['shop', `Weapon Arsenal (${WEAPON_ORDER.length})`],
+                ['customize', 'Character & Gun Skins'],
                 ['inventory', 'Inventory'],
               ] as const
             ).map(([id, label]) => (
@@ -143,94 +161,161 @@ export function ShopAndCustomize({ initialTab, profile, onProfileUpdated, onClos
         )}
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto mt-5 pr-1">
+        <div className="flex-1 overflow-y-auto mt-4 pr-1">
           {tab === 'shop' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {WEAPON_ORDER.map((wid) => {
-                const ownedInfo = profile.weapons[wid];
-                const level = ownedInfo?.upgradeLevel || 1;
-                const stats = getWeaponStatsAtLevel(wid, level);
-                const isEquipped = profile.equippedWeapon === wid;
-                const upgradeCost = getWeaponUpgradeCost(level);
-
-                return (
-                  <div
-                    key={wid}
-                    className={`bg-[#131924] border rounded-xl p-4 flex flex-col justify-between ${
-                      isEquipped ? 'border-red-500/80' : 'border-slate-700/40'
+            <div className="space-y-4">
+              {/* Category Tabs & Search */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-2 border-b border-slate-800/80">
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                  <button
+                    onClick={() => {
+                      audioEngine.playUiClick();
+                      setWeaponClassFilter('all');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                      weaponClassFilter === 'all'
+                        ? 'bg-red-600 text-white'
+                        : 'bg-[#131924] border border-slate-700/45 text-slate-300 hover:text-white'
                     }`}
                   >
-                    <div>
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="text-xs text-slate-400">{stats.category}</div>
-                          <h3 className="font-display text-lg font-bold text-slate-100">{stats.name}</h3>
-                        </div>
-                        {ownedInfo && (
-                          <span className="font-mono-num text-xs text-amber-400 font-semibold">
-                            Mk.{level}/5
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-400 mt-2 leading-relaxed">{stats.description}</p>
+                    All ({WEAPON_ORDER.length})
+                  </button>
+                  {WEAPON_CLASSES.map((wc) => {
+                    const count = WEAPON_ORDER.filter((id) => WEAPONS[id].weaponClass === wc.id).length;
+                    return (
+                      <button
+                        key={wc.id}
+                        onClick={() => {
+                          audioEngine.playUiClick();
+                          setWeaponClassFilter(wc.id);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
+                          weaponClassFilter === wc.id
+                            ? 'bg-red-600 text-white'
+                            : 'bg-[#131924] border border-slate-700/45 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {wc.shortLabel} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
 
-                      <div className="grid grid-cols-3 gap-2 mt-4 pt-3 border-t border-slate-800 text-xs">
-                        <div>
-                          <div className="text-slate-500">Damage</div>
-                          <div className="font-mono-num font-semibold text-slate-200">
-                            {stats.damage}
-                            {stats.pellets > 1 ? `×${stats.pellets}` : ''}
+                <div className="relative w-full md:w-64 shrink-0">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={weaponSearch}
+                    onChange={(e) => setWeaponSearch(e.target.value)}
+                    placeholder="Search 48 weapons..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-[#07090d] border border-slate-700/60 text-xs text-slate-100 focus:outline-none focus:border-red-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {filteredWeapons.map((wid) => {
+                  const ownedInfo = profile.weapons[wid];
+                  const level = ownedInfo?.upgradeLevel || 1;
+                  const stats = getWeaponStatsAtLevel(wid, level);
+                  const isEquipped = profile.equippedWeapon === wid;
+                  const upgradeCost = getWeaponUpgradeCost(level);
+
+                  return (
+                    <div
+                      key={wid}
+                      className={`bg-[#131924] border rounded-xl p-4 flex flex-col justify-between ${
+                        isEquipped ? 'border-red-500/80' : 'border-slate-700/40'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] uppercase tracking-wide text-slate-400">
+                                {stats.category}
+                              </span>
+                              {stats.explosionRadius && (
+                                <span className="text-[10px] font-mono-num px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-700/50 text-amber-300">
+                                  Blast {stats.explosionRadius}m
+                                </span>
+                              )}
+                              {stats.isMelee && (
+                                <span className="text-[10px] font-mono-num px-1.5 py-0.5 rounded bg-sky-950/70 border border-sky-700/50 text-sky-300">
+                                  Melee
+                                </span>
+                              )}
+                            </div>
+                            <h3 className="font-display text-lg font-bold text-slate-100 mt-0.5">{stats.name}</h3>
+                          </div>
+                          {ownedInfo && (
+                            <span className="font-mono-num text-xs text-amber-400 font-semibold shrink-0">
+                              Mk.{level}/5
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-400 mt-2 leading-relaxed">{stats.description}</p>
+
+                        <div className="grid grid-cols-3 gap-2 mt-4 pt-3 border-t border-slate-800 text-xs">
+                          <div>
+                            <div className="text-slate-500">Damage</div>
+                            <div className="font-mono-num font-semibold text-slate-200">
+                              {stats.damage}
+                              {stats.pellets > 1 ? `×${stats.pellets}` : ''}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-slate-500">Fire Rate</div>
+                            <div className="font-mono-num font-semibold text-slate-200">{stats.fireRate}/s</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-500">{stats.isMelee ? 'Ammo' : 'Magazine'}</div>
+                            <div className="font-mono-num font-semibold text-slate-200">
+                              {stats.isMelee ? 'Infinite' : stats.magSize}
+                            </div>
                           </div>
                         </div>
-                        <div>
-                          <div className="text-slate-500">Fire Rate</div>
-                          <div className="font-mono-num font-semibold text-slate-200">{stats.fireRate}/s</div>
-                        </div>
-                        <div>
-                          <div className="text-slate-500">Magazine</div>
-                          <div className="font-mono-num font-semibold text-slate-200">{stats.magSize}</div>
-                        </div>
+                      </div>
+
+                      <div className="mt-4 pt-3 border-t border-slate-800 flex items-center gap-2">
+                        {!ownedInfo ? (
+                          <button
+                            onClick={() => handleWeaponAction(wid, 'buy')}
+                            disabled={busy || profile.coins < stats.cost}
+                            className="w-full py-2 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:bg-slate-800 disabled:text-slate-500 text-xs font-semibold text-white cursor-pointer"
+                          >
+                            Unlock · {stats.cost} Coins
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleWeaponAction(wid, 'equip')}
+                              disabled={isEquipped || busy}
+                              className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold cursor-pointer ${
+                                isEquipped
+                                  ? 'bg-emerald-800/60 text-emerald-200 cursor-default'
+                                  : 'bg-red-600 hover:bg-red-500 text-white'
+                              }`}
+                            >
+                              {isEquipped ? 'Equipped' : 'Equip'}
+                            </button>
+                            {level < 5 && (
+                              <button
+                                onClick={() => handleWeaponAction(wid, 'upgrade')}
+                                disabled={busy || profile.coins < upgradeCost}
+                                className="flex items-center gap-1 py-2 px-3 rounded-lg bg-[#0d1118] border border-slate-600 hover:border-amber-500 disabled:opacity-40 text-xs text-amber-300 cursor-pointer"
+                              >
+                                <ArrowUpCircle className="w-3.5 h-3.5" />
+                                <span className="font-mono-num">{upgradeCost}c</span>
+                              </button>
+                            )}
+                          </>
+                        )}
                       </div>
                     </div>
-
-                    <div className="mt-4 pt-3 border-t border-slate-800 flex items-center gap-2">
-                      {!ownedInfo ? (
-                        <button
-                          onClick={() => handleWeaponAction(wid, 'buy')}
-                          disabled={busy || profile.coins < stats.cost}
-                          className="w-full py-2 px-4 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:bg-slate-800 disabled:text-slate-500 text-xs font-semibold text-white cursor-pointer"
-                        >
-                          Unlock · {stats.cost} Coins
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => handleWeaponAction(wid, 'equip')}
-                            disabled={isEquipped || busy}
-                            className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold cursor-pointer ${
-                              isEquipped
-                                ? 'bg-emerald-800/60 text-emerald-200 cursor-default'
-                                : 'bg-red-600 hover:bg-red-500 text-white'
-                            }`}
-                          >
-                            {isEquipped ? 'Equipped' : 'Equip'}
-                          </button>
-                          {level < 5 && (
-                            <button
-                              onClick={() => handleWeaponAction(wid, 'upgrade')}
-                              disabled={busy || profile.coins < upgradeCost}
-                              className="flex items-center gap-1 py-2 px-3 rounded-lg bg-[#0d1118] border border-slate-600 hover:border-amber-500 disabled:opacity-40 text-xs text-amber-300 cursor-pointer"
-                            >
-                              <ArrowUpCircle className="w-3.5 h-3.5" />
-                              <span className="font-mono-num">{upgradeCost}c</span>
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -321,20 +406,24 @@ export function ShopAndCustomize({ initialTab, profile, onProfileUpdated, onClos
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                   {Object.keys(profile.weapons).map((wid) => {
                     const w = WEAPONS[wid as WeaponId];
+                    if (!w) return null;
                     const lvl = profile.weapons[wid].upgradeLevel;
                     const eq = profile.equippedWeapon === wid;
                     return (
-                      <div key={wid} className="bg-[#131924] border border-slate-700/40 rounded-lg p-3.5 flex items-center justify-between">
-                        <div>
-                          <div className="font-semibold text-sm text-slate-100">{w.name}</div>
+                      <div
+                        key={wid}
+                        className="bg-[#131924] border border-slate-700/40 rounded-lg p-3.5 flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-semibold text-sm text-slate-100 truncate">{w.name}</div>
                           <div className="text-xs text-slate-400">
-                            {w.category} · Upgrade Mk.{lvl}
+                            {w.category} · Mk.{lvl}
                           </div>
                         </div>
                         <button
                           onClick={() => handleWeaponAction(wid as WeaponId, 'equip')}
                           disabled={eq}
-                          className={`px-3 py-1.5 rounded text-xs font-semibold cursor-pointer ${
+                          className={`px-3 py-1.5 rounded text-xs font-semibold cursor-pointer shrink-0 ${
                             eq ? 'bg-emerald-800/50 text-emerald-200' : 'bg-red-600 hover:bg-red-500 text-white'
                           }`}
                         >
@@ -348,15 +437,21 @@ export function ShopAndCustomize({ initialTab, profile, onProfileUpdated, onClos
 
               <div>
                 <h3 className="font-display text-base font-semibold text-slate-200 mb-3">
-                  Owned Gear & Skins ({ownedCustomItems.length})
+                  Owned Gear &amp; Skins ({ownedCustomItems.length})
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                   {ownedCustomItems.map((item) => {
                     const eq = profile.equippedLoadout[item.category] === item.id;
                     return (
-                      <div key={item.id} className="bg-[#131924] border border-slate-700/40 rounded-lg p-3.5 flex items-center justify-between gap-3">
+                      <div
+                        key={item.id}
+                        className="bg-[#131924] border border-slate-700/40 rounded-lg p-3.5 flex items-center justify-between gap-3"
+                      >
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <span className="w-4 h-4 rounded border border-white/20 shrink-0" style={{ backgroundColor: item.color }} />
+                          <span
+                            className="w-4 h-4 rounded border border-white/20 shrink-0"
+                            style={{ backgroundColor: item.color }}
+                          />
                           <div className="min-w-0">
                             <div className="font-semibold text-sm text-slate-100 truncate">{item.name}</div>
                             <div className="text-xs text-slate-400 capitalize">{item.category.replace('_', ' ')}</div>

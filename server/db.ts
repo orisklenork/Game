@@ -82,7 +82,7 @@ db.exec(`
     host_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
     map_id TEXT NOT NULL DEFAULT 'hospital',
     difficulty TEXT NOT NULL DEFAULT 'normal',
-    status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'playing', 'finished')),
+    status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'voting', 'playing', 'finished')),
     max_players INTEGER NOT NULL DEFAULT 2,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -819,16 +819,34 @@ export function removeFriend(playerId: string, friendId: string) {
   );
 }
 
-export function getLeaderboard(playerId: string, scope: 'global' | 'friends') {
+export function getLeaderboard(
+  playerId: string | null,
+  scope: 'global' | 'friends',
+  sort = 'kills'
+) {
+  const orderClause =
+    sort === 'wave'
+      ? 'COALESCE(s.highest_wave, 0) DESC, COALESCE(s.total_kills, 0) DESC'
+      : sort === 'wins'
+      ? 'COALESCE(s.matches_won, 0) DESC, COALESCE(s.total_kills, 0) DESC'
+      : sort === 'level'
+      ? 'p.level DESC, p.xp DESC'
+      : 'COALESCE(s.total_kills, 0) DESC, p.xp DESC';
+
   if (scope === 'friends') {
+    if (!playerId) return [];
     return db
       .prepare(
         `SELECT p.id, p.player_code, p.username, p.level, p.xp, p.rank, p.coins,
-                s.total_kills, s.matches_won, s.highest_wave
+                COALESCE(s.total_kills, 0) AS total_kills,
+                COALESCE(s.boss_kills, 0) AS boss_kills,
+                COALESCE(s.matches_played, 0) AS matches_played,
+                COALESCE(s.matches_won, 0) AS matches_won,
+                COALESCE(s.highest_wave, 0) AS highest_wave
          FROM profiles p
-         JOIN player_stats s ON s.player_id = p.id
+         LEFT JOIN player_stats s ON s.player_id = p.id
          WHERE p.id = ? OR p.id IN (SELECT friend_id FROM friends WHERE player_id = ?)
-         ORDER BY s.total_kills DESC, p.xp DESC
+         ORDER BY ${orderClause}
          LIMIT 50`
       )
       .all(playerId, playerId);
@@ -836,10 +854,14 @@ export function getLeaderboard(playerId: string, scope: 'global' | 'friends') {
   return db
     .prepare(
       `SELECT p.id, p.player_code, p.username, p.level, p.xp, p.rank, p.coins,
-              s.total_kills, s.matches_won, s.highest_wave
+              COALESCE(s.total_kills, 0) AS total_kills,
+              COALESCE(s.boss_kills, 0) AS boss_kills,
+              COALESCE(s.matches_played, 0) AS matches_played,
+              COALESCE(s.matches_won, 0) AS matches_won,
+              COALESCE(s.highest_wave, 0) AS highest_wave
        FROM profiles p
-       JOIN player_stats s ON s.player_id = p.id
-       ORDER BY s.total_kills DESC, p.xp DESC
+       LEFT JOIN player_stats s ON s.player_id = p.id
+       ORDER BY ${orderClause}
        LIMIT 50`
     )
     .all();

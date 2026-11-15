@@ -1,5 +1,18 @@
-import React, { useEffect, useState } from 'react';
-import { Award, Check, Coins, Gift, Search, Trash2, Trophy, UserPlus, Users, X } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  AlertTriangle,
+  Award,
+  Check,
+  Coins,
+  Gift,
+  RefreshCw,
+  Search,
+  Trash2,
+  Trophy,
+  UserPlus,
+  Users,
+  X,
+} from 'lucide-react';
 import { ACHIEVEMENTS, getLevelFromXp, MAPS, WEAPONS, WeaponId } from '../shared/gameData';
 import { apiFetch, PlayerProfile } from '../lib/api';
 import { audioEngine } from '../game/audio';
@@ -13,6 +26,8 @@ interface Props {
   onClose: () => void;
 }
 
+type LeaderboardSort = 'kills' | 'wave' | 'wins' | 'level';
+
 export function SocialAndProfile({
   initialTab,
   profile,
@@ -23,6 +38,9 @@ export function SocialAndProfile({
 }: Props) {
   const [tab, setTab] = useState<'friends' | 'leaderboard' | 'profile'>(initialTab);
   const [lbScope, setLbScope] = useState<'global' | 'friends'>('global');
+  const [lbSort, setLbSort] = useState<LeaderboardSort>('kills');
+  const [lbLoading, setLbLoading] = useState(false);
+  const [lbError, setLbError] = useState<string | null>(null);
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [friendsData, setFriendsData] = useState<{ friends: any[]; incoming: any[]; outgoing: any[] }>({
     friends: [],
@@ -38,32 +56,39 @@ export function SocialAndProfile({
   const today = new Date().toISOString().slice(0, 10);
   const canClaimDaily = profile.lastDailyClaim !== today;
 
-  const loadFriends = async () => {
+  const loadFriends = useCallback(async () => {
     try {
       const data = await apiFetch('/api/friends');
       setFriendsData(data);
     } catch {}
-  };
+  }, []);
 
-  const loadLeaderboard = async (scope: 'global' | 'friends') => {
+  const loadLeaderboard = useCallback(async (scope: 'global' | 'friends', sort: LeaderboardSort) => {
+    setLbLoading(true);
+    setLbError(null);
     try {
-      const data = await apiFetch<{ entries: any[] }>(`/api/leaderboard?scope=${scope}`);
-      setLeaderboard(data.entries);
-    } catch {}
-  };
+      const data = await apiFetch<{ entries: any[] }>(`/api/leaderboard?scope=${scope}&sort=${sort}`);
+      setLeaderboard(Array.isArray(data?.entries) ? data.entries : []);
+    } catch (err: any) {
+      setLbError(err?.message || 'Unable to load rankings from server.');
+      setLeaderboard([]);
+    } finally {
+      setLbLoading(false);
+    }
+  }, []);
 
-  const loadHistory = async () => {
+  const loadHistory = useCallback(async () => {
     try {
       const data = await apiFetch<{ matches: any[] }>('/api/matches/history');
-      setMatchHistory(data.matches);
+      setMatchHistory(data.matches || []);
     } catch {}
-  };
+  }, []);
 
   useEffect(() => {
     if (tab === 'friends') loadFriends();
-    if (tab === 'leaderboard') loadLeaderboard(lbScope);
+    if (tab === 'leaderboard') loadLeaderboard(lbScope, lbSort);
     if (tab === 'profile') loadHistory();
-  }, [tab, lbScope]);
+  }, [tab, lbScope, lbSort, loadFriends, loadLeaderboard, loadHistory]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -330,7 +355,7 @@ export function SocialAndProfile({
                 <h3 className="font-display text-base font-semibold text-slate-200 mb-3">Recent Match History</h3>
                 {matchHistory.length === 0 ? (
                   <div className="text-xs text-slate-500 bg-[#131924] border border-slate-800 rounded-lg p-4">
-                    No matches played yet. Deploy into a solo or 2-player survival match to record history.
+                    No matches played yet. Deploy into a solo, 2-player survival, or 1v1 duel match to record history.
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -499,19 +524,75 @@ export function SocialAndProfile({
 
           {tab === 'leaderboard' && (
             <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                {(['global', 'friends'] as const).map((s) => (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  {(['global', 'friends'] as const).map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => {
+                        audioEngine.playUiClick();
+                        setLbScope(s);
+                      }}
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold capitalize cursor-pointer ${
+                        lbScope === s ? 'bg-red-600 text-white' : 'bg-[#131924] text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {s} Rankings
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {(
+                    [
+                      ['kills', 'By Kills'],
+                      ['wave', 'By Best Wave'],
+                      ['wins', 'By Wins'],
+                      ['level', 'By Level'],
+                    ] as const
+                  ).map(([sKey, sLabel]) => (
+                    <button
+                      key={sKey}
+                      onClick={() => {
+                        audioEngine.playUiClick();
+                        setLbSort(sKey);
+                      }}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer ${
+                        lbSort === sKey
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-[#131924] border border-slate-700/50 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {sLabel}
+                    </button>
+                  ))}
+
                   <button
-                    key={s}
-                    onClick={() => setLbScope(s)}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold capitalize cursor-pointer ${
-                      lbScope === s ? 'bg-red-600 text-white' : 'bg-[#131924] text-slate-300 hover:text-white'
-                    }`}
+                    onClick={() => loadLeaderboard(lbScope, lbSort)}
+                    disabled={lbLoading}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#131924] border border-slate-700/50 hover:border-slate-500 text-xs text-slate-200 cursor-pointer disabled:opacity-50"
+                    title="Refresh Leaderboard"
                   >
-                    {s} Rankings
+                    <RefreshCw className={`w-3.5 h-3.5 ${lbLoading ? 'animate-spin' : ''}`} />
+                    <span>Refresh</span>
                   </button>
-                ))}
+                </div>
               </div>
+
+              {lbError && (
+                <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-red-950/60 border border-red-700/60 text-xs text-red-200">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>{lbError}</span>
+                  </div>
+                  <button
+                    onClick={() => loadLeaderboard(lbScope, lbSort)}
+                    className="px-3 py-1 rounded bg-red-600 hover:bg-red-500 text-white font-semibold cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
               <div className="overflow-x-auto bg-[#131924] border border-slate-700/40 rounded-xl">
                 <table className="w-full text-left text-xs">
@@ -522,36 +603,58 @@ export function SocialAndProfile({
                       <th className="py-3 px-4">Rank</th>
                       <th className="py-3 px-4 text-right">Level</th>
                       <th className="py-3 px-4 text-right">Kills</th>
+                      <th className="py-3 px-4 text-right">Best Wave</th>
+                      <th className="py-3 px-4 text-right">Bosses</th>
                       <th className="py-3 px-4 text-right">Wins</th>
                       <th className="py-3 px-4 text-right">Coins</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {leaderboard.map((row, idx) => (
-                      <tr
-                        key={row.id}
-                        className={`border-b border-slate-800/60 last:border-0 ${
-                          row.id === profile.id ? 'bg-red-950/25' : ''
-                        }`}
-                      >
-                        <td className="py-3 px-4 font-mono-num font-bold text-slate-300">
-                          {idx === 0 ? <Trophy className="w-4 h-4 text-amber-400 inline" /> : idx + 1}
-                        </td>
-                        <td className="py-3 px-4 font-semibold text-slate-100">
-                          {row.username}
-                          <span className="text-slate-500 font-mono-num ml-1.5">{row.player_code}</span>
-                        </td>
-                        <td className="py-3 px-4 text-slate-300">{row.rank}</td>
-                        <td className="py-3 px-4 text-right font-mono-num text-slate-200">{row.level}</td>
-                        <td className="py-3 px-4 text-right font-mono-num font-semibold text-red-400">{row.total_kills}</td>
-                        <td className="py-3 px-4 text-right font-mono-num text-slate-200">{row.matches_won}</td>
-                        <td className="py-3 px-4 text-right font-mono-num text-amber-400">{row.coins}</td>
-                      </tr>
-                    ))}
-                    {leaderboard.length === 0 && (
+                    {lbLoading && leaderboard.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-6 text-center text-slate-500">
-                          No ranking entries found yet.
+                        <td colSpan={9} className="py-8 text-center text-slate-400">
+                          Loading operative rankings...
+                        </td>
+                      </tr>
+                    ) : (
+                      leaderboard.map((row, idx) => (
+                        <tr
+                          key={row.id}
+                          className={`border-b border-slate-800/60 last:border-0 ${
+                            row.id === profile.id ? 'bg-red-950/25' : ''
+                          }`}
+                        >
+                          <td className="py-3 px-4 font-mono-num font-bold text-slate-300">
+                            {idx === 0 ? <Trophy className="w-4 h-4 text-amber-400 inline" /> : idx + 1}
+                          </td>
+                          <td className="py-3 px-4 font-semibold text-slate-100">
+                            {row.username}
+                            <span className="text-slate-500 font-mono-num ml-1.5">{row.player_code}</span>
+                          </td>
+                          <td className="py-3 px-4 text-slate-300">{row.rank}</td>
+                          <td className="py-3 px-4 text-right font-mono-num text-slate-200">{row.level}</td>
+                          <td className="py-3 px-4 text-right font-mono-num font-semibold text-red-400">
+                            {row.total_kills ?? 0}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono-num text-sky-300">
+                            {row.highest_wave ?? 0}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono-num text-orange-300">
+                            {row.boss_kills ?? 0}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono-num text-slate-200">
+                            {row.matches_won ?? 0}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono-num text-amber-400">
+                            {(row.coins ?? 0).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                    {!lbLoading && !lbError && leaderboard.length === 0 && (
+                      <tr>
+                        <td colSpan={9} className="py-6 text-center text-slate-500">
+                          No ranking entries found yet. Complete a match to claim the #1 spot.
                         </td>
                       </tr>
                     )}
